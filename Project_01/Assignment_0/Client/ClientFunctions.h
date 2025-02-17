@@ -1,0 +1,16 @@
+#ifndef CLIENTFUNCTIONS_H
+#define CLIENTFUNCTIONS_H
+
+/*Includes*/
+
+/*Defines*/
+
+/*Typedefs*/
+typedef struct sockaddr ST_sockaddr;
+typedef struct sockaddr_in ST_sockaddr_in;
+/*Function Declarations*/
+
+/*Function Definitions*/
+
+
+#endif
