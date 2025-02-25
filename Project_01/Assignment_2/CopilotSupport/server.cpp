@@ -4,24 +4,26 @@
 #include <cstring>
 #include <fcntl.h>
 #include <string>
-#include <unistd.h>      // For getcwd()
-#include <arpa/inet.h>   // For socket functions
+#include <unistd.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <atomic>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
 #define SOURCE_FOLDER "./serverImage/"
 #define COPY_FOLDER "./serverRenameImage/"
 #define MAX_NO_TRANSFERS 25
-#define NUMBER_OF_SERVER_THREADS 1
+#define NUMBER_OF_SERVER_THREADS 10
 
-int noOfRequests = 0;
+std::atomic<int> noOfRequests(0);
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void* handle_client(void* accepted_socket) {
     int client_socket = *(int*)accepted_socket;
+    delete (int*)accepted_socket;  // Free the dynamically allocated memory
     char buffer[BUFFER_SIZE] = {0};
 
     while (true) {
@@ -31,35 +33,29 @@ void* handle_client(void* accepted_socket) {
             break;
         }
 
-        // Ensure null-termination of received string
         buffer[bytes_received] = '\0';
         std::string image_name = std::string(buffer);
         std::cout << "Client requested for: " << image_name << std::endl;
 
-        // Check if the file exists
         std::ifstream imageFile(SOURCE_FOLDER + image_name, std::ios::binary);
         if (!imageFile) {
             std::cerr << "Error: Image file '" << image_name << "' not found!" << std::endl;
             continue;
         } else {
-            // Generate unique renaming for the image based on timestamp and client info
             std::string new_image_name = image_name;
             pthread_mutex_lock(&mutex);
-            new_image_name.insert(new_image_name.find_last_of('.'), "" + std::to_string(client_socket) + "" + std::to_string(noOfRequests));
+            new_image_name.insert(new_image_name.find_last_of('.'), "_" + std::to_string(client_socket) + "_" + std::to_string(noOfRequests));
             pthread_mutex_unlock(&mutex);
 
-            // Sending the renamed image name
             std::cout << "Renamed image name: " << new_image_name << std::endl;
             send(client_socket, new_image_name.c_str(), new_image_name.length() + 1, 0);
 
-            // Renaming and saving a copy
             std::ofstream outputFile(COPY_FOLDER + new_image_name, std::ios::binary);
             outputFile << imageFile.rdbuf();
             imageFile.close();
             outputFile.close();
             std::cout << "File copy completed" << std::endl;
 
-            // Sending file size and file data
             std::ifstream fileHandle(COPY_FOLDER + new_image_name, std::ios::binary | std::ios::ate);
             std::streamsize fileSize = fileHandle.tellg();
             std::cout << "Renamed image size: " << fileSize << std::endl;
@@ -85,21 +81,15 @@ void* handle_client(void* accepted_socket) {
                 total_bytes_sent += bytes_sent;
             }
 
-            pthread_mutex_lock(&mutex);
-            noOfRequests += 1;
+            noOfRequests++;
             std::cout << "***" << noOfRequests << "****" << std::endl;
-            pthread_mutex_unlock(&mutex);
 
             std::cout << "File transfer is complete" << std::endl;
         }
 
-        // Check transfer limit
-        pthread_mutex_lock(&mutex);
         if (noOfRequests >= MAX_NO_TRANSFERS) {
-            pthread_mutex_unlock(&mutex);
             break;
         }
-        pthread_mutex_unlock(&mutex);
     }
 
     close(client_socket);
@@ -141,12 +131,9 @@ int main() {
         (void)pthread_create(&th, nullptr, handle_client, accepted_socket);
         pthread_detach(th);
 
-        pthread_mutex_lock(&mutex);
         if (noOfRequests >= MAX_NO_TRANSFERS) {
-            pthread_mutex_unlock(&mutex);
             break;
         }
-        pthread_mutex_unlock(&mutex);
     }
 
     std::cout << "Total requests handled: " << noOfRequests << std::endl;
