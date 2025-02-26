@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <sstream>
+#include <queue>
 
 #define SERVER_IP "127.0.0.1"  // Localhost
 #define PORT 8080
@@ -49,7 +50,8 @@ std::vector<std::string> operations =   {
                                             "foo"
                                         };
 int noOfRequests = 0;
-char buffer[BUFFER_SIZE];
+std::queue<std::string> client_requests;
+std::queue<std::string> server_requests;
 
 void foo() {for(long i = 0; i < 10000; i++);}
 
@@ -68,10 +70,11 @@ std::string sort(std::vector<int> arr)
     return ss.str();
 }
 
-int main(int argc, char* argv[])
+int main()
 {
     int client_socket = socket(AF_INET, SOCK_STREAM, 0);
     ST_sockaddr_in server_addr, client_addr;
+    int random_number;
     
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(PORT);
@@ -79,56 +82,27 @@ int main(int argc, char* argv[])
 
     std::srand(std::time(0));
     std::string request = "", response = "";
-    
-    int loopBreaker = argc-1;
-    if(argc < 2)
-        loopBreaker = MAX_NO_REQUESTS;
+
+    for(int i = 0; i < MAX_NO_REQUESTS ; i++)
+    {
+        random_number = std::rand() % operations.size();
+        client_requests.push(operations.at(random_number));
+        random_number = std::rand() % operations.size();
+        server_requests.push(operations.at(random_number));
+    }
 
     if(connect(client_socket, (ST_sockaddr*)&server_addr, sizeof(server_addr)) == 0)
     {
         while(true)
         {
-            if(argc < 2)
+            if(client_requests.size() != 0)
             {
-                int random_number = std::rand() % operations.size();
-                request = operations.at(random_number);
-            }
-            else
-            {
-                for(int i = 1; i < argc; i++)
-                    request = request + argv[i] + " ";
-            }
-
-            //request += '\n';
-            std::cout << "Client-Server<<" + request << std::endl;
-            int bytesSent = send(client_socket, request.c_str(), request.length(), 0);
-            if(bytesSent < 0)
-            {
-                std::cerr << "Send error..." << std::endl;
-                std::cout << errno << std::endl;
-                return 0;
-            }
-            
-            memset(buffer, 0, BUFFER_SIZE);
-            int recvBytes = recv(client_socket, buffer, BUFFER_SIZE, 0);
-            if(recvBytes < 0)
-            {
-                std::cerr << "Read error..." << std::endl;
-                std::cout << errno << std::endl;
-                return 0;
-            }
-            std::cout << buffer << std::endl;
-
-            {
-                /*This block has been created to handle client operations*/
-                int random_number = std::rand() % operations.size();
-                request = operations.at(random_number);
+                request = client_requests.front();
                 std::cout << "Client-Client<<" + request << std::endl;
                 std::stringstream ss(request);
                 std::string operation, response;
                 ss >> operation;
                 
-                //std::cout << "Requested operation is " << operation << std::endl;
 
                 if(strcmp(operation.c_str(), "add") == 0)
                 {
@@ -149,12 +123,36 @@ int main(int argc, char* argv[])
                         arr.push_back(num);
                     response = sort(arr);
                 }
+                client_requests.pop();
                 response = "Client-Client>>" + operation + " " + response;
-                std::cout << response << std::endl;
             }
-
+                
+            if(server_requests.size() != 0)
+            {
+                request = server_requests.front();
+                std::cout << "Client<<" + request << std::endl;
+                int bytesSent = send(client_socket, request.c_str(), request.length(), 0);
+                if(bytesSent < 0)
+                {
+                    std::cerr << "Send error..." << std::endl;
+                    std::cout << errno << std::endl;
+                    return 0;
+                }
+                
+                char buffer[BUFFER_SIZE];
+                int recvBytes = recv(client_socket, buffer, BUFFER_SIZE, 0);
+                if(recvBytes < 0)
+                {
+                    std::cerr << "Read error..." << std::endl;
+                    std::cout << errno << std::endl;
+                    return 0;
+                }
+                std::cout << buffer << std::endl;
+                server_requests.pop();
+            }
+            
             noOfRequests++;
-            if(noOfRequests == loopBreaker)
+            if((client_requests.size() == 0) && (server_requests.size() == 0))
             {
                 break;
             }

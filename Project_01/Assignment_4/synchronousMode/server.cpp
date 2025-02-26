@@ -83,7 +83,7 @@ void client_handler(void* stp_ClientConnection)
                     arr.push_back(num);
                 response = sort(arr);
             }
-            response = "Server-Client>>" + operation + " " + response;
+            response = "Server>>" + operation + " " + response;
             int sentBytes = send(client_socket, response.c_str(), response.length(), 0);
             if(sentBytes < 0)
             {
