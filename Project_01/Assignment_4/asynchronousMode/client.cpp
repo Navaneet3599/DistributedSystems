@@ -92,7 +92,7 @@ int main()
         random_number = std::rand() % operations.size();
         client_requests.push(operations.at(random_number));
         random_number = std::rand() % operations.size();
-        client_requests.push(operations.at(random_number));
+        server_requests.push(operations.at(random_number));
     }
     
 
@@ -103,7 +103,7 @@ int main()
             if(client_requests.size() != 0)
             {
                 request = client_requests.front();
-                std::cout << "Client-Client<<" + request << std::endl;
+                //std::cout << "Client-Client<<" + request << std::endl;
                 std::stringstream ss(request);
                 std::string operation, response;
                 ss >> operation;
@@ -129,14 +129,15 @@ int main()
                     response = sort(arr);
                 }
                 client_requests.pop();
-                response = "Client-Client>>" + operation + " " + response;
+                //response = "Client-Client>>" + operation + " " + response;
             }
 
             /*Sending requests to server*/
             if(server_requests.size() != 0)
             {
                 request = server_requests.front();
-                std::cout << "Client-Server<<" + request << std::endl;
+                //std::cout << "Client-Server<<" + request << std::endl;
+
                 int bytesSent = send(client_socket, ("req "+request).c_str(), request.length()+4, 0);
                 if(bytesSent < 0)
                 {
@@ -156,7 +157,7 @@ int main()
                 std::cout << buffer << std::endl;
                 if(strncmp(buffer, "ACK", 3) == 0)
                 {
-                    std::cout << "Request in message queue..." << std::endl;
+                    //std::cout << "Request in message queue..." << std::endl;
                     std::string temp(buffer);
                     std::stringstream ss(buffer);
                     std::string timeHash;
@@ -176,7 +177,7 @@ int main()
             if(server_response.size() != 0)
             {
                 request = server_response.front();
-                std::cout << "Client-Server<<" + request << std::endl;
+                //std::cout << "Client-Server<<" + request << std::endl;
                 int bytesSent = send(client_socket, ("res "+request).c_str(), request.length()+4, 0);
                 if(bytesSent < 0)
                 {
@@ -187,6 +188,7 @@ int main()
 
                 memset(buffer, 0, BUFFER_SIZE);
                 int recvBytes = recv(client_socket, buffer, BUFFER_SIZE, 0);
+                std::cout << buffer << std::endl;
                 if(recvBytes < 0)
                 {
                     std::cerr << "Read error..." << std::endl;
@@ -194,10 +196,13 @@ int main()
                     return 0;
                 }
 
-                if(strcmp(buffer, "NAK") == 0)
-                    std::cout << "Computation in progress at server..." << std::endl;
+                if(strcmp(buffer, "NAK") == 0);
+                    //std::cout << "Computation in progress at server..." << std::endl;
                 else
-                    std::cout << buffer << std::endl;
+                {
+                    //std::cout << buffer << std::endl;
+                    server_response.pop();
+                }
             }
 
             if((client_requests.size() == 0) && (server_requests.size() == 0) && (server_response.size() == 0))

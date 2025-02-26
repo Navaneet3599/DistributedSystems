@@ -129,7 +129,6 @@ std::string generateTimestamp()
 void* client_handler(void* stp_ClientConnection)
 {
     int client_socket = ((ST_ClientConnection*)stp_ClientConnection)->client_socket;
-    
     while(true)
     {
         int bytesReceived;
@@ -139,9 +138,11 @@ void* client_handler(void* stp_ClientConnection)
         {
             buffer[bytesReceived] = '\0';
             std::string client_message(buffer), request, response;
+
             std::stringstream ss(client_message);
             std::string message_type;
             ss >> message_type;
+
             if(strcmp(message_type.c_str(), "req") == 0)
             {
                 request = client_message.substr(4);
@@ -154,6 +155,7 @@ void* client_handler(void* stp_ClientConnection)
             {
                 request = client_message.substr(4);
                 ST_ClientReq temp = results_table[request];
+                
                 if(temp.res.empty())
                     response = "NAK";
                 else
@@ -174,6 +176,7 @@ void* client_handler(void* stp_ClientConnection)
             }
             else
             {
+                std::cout << "Server received invalid request" << std::endl;
                 response = "Invalid request";
             }
 
@@ -199,38 +202,41 @@ void* request_handler(void* unused)
     {   
         if((client_requests.checkTerminationRequest() == true) && (client_requests.size() == 0))
             break;
-
-        std::string timeHash = client_requests.front();
-        ST_ClientReq temp = results_table[timeHash];
-        std::string request = temp.req;
-        std::stringstream ss(request);
-        std::string operation, response;
-        ss >> operation;
-
-
-        if(strcmp(operation.c_str(), "add") == 0)
+        else if(client_requests.size() != 0)
         {
-            int a, b;
-            ss >> a >> b;
-            response = add(a, b);
-        }
-        else if(strcmp(operation.c_str(), "foo") == 0)
-        {
-            foo();
-            response = " ";
-        }
-        else if(strcmp(operation.c_str(), "sort") == 0)
-        {
-            std::vector<int> arr;
-            int num;
-            while(ss >> num)
-                arr.push_back(num);
-            response = sort(arr);
-        }
+            std::string timeHash = client_requests.front();
+            ST_ClientReq temp = results_table[timeHash];
+            std::string request = temp.req;
+            std::stringstream ss(request);
+            std::string operation, response;
+            ss >> operation;
+    
+            std::cout << "====" << operation << "====" << std::endl;
 
-        temp.res = response;
-        results_table[request] = temp;
-        client_requests.pop();
+            if(strcmp(operation.c_str(), "add") == 0)
+            {
+                int a, b;
+                ss >> a >> b;
+                response = add(a, b);
+            }
+            else if(strcmp(operation.c_str(), "foo") == 0)
+            {
+                foo();
+                response = " ";
+            }
+            else if(strcmp(operation.c_str(), "sort") == 0)
+            {
+                std::vector<int> arr;
+                int num;
+                while(ss >> num)
+                    arr.push_back(num);
+                response = sort(arr);
+            }
+            
+            temp.res = response;
+            results_table[timeHash] = temp;
+            client_requests.pop();
+        }
     }
 }
 
@@ -275,8 +281,8 @@ int main()
         pthread_create(&workerThread, nullptr, client_handler, &st_ClientConnection);
         pthread_create(&reqThread, nullptr, request_handler, &st_ClientConnection);
 
-        pthread_detach(reqThread);
-        pthread_detach(workerThread);
+        pthread_join(reqThread, nullptr);
+        pthread_join(workerThread, nullptr);
     }
     return 0;
 }
