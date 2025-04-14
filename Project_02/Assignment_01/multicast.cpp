@@ -10,17 +10,42 @@
 #include <chrono>
 #include <ctime>
 #include <set>
+#include <mutex>
+
+#pragma pack(1)
 
 #define PORT 8080
 #define ENABLE_LOGS true
-#define BUFFER_SIZE 1024
 #define NUMBER_OF_CONNECTIONS 3
 #define NUMBER_OF_REQUESTS 3
-#define SERVER_IP "127.0.0.1"
+#define RETRY_LIMIT 3
+#define TIMEOUT_DURATION 3
 #define BROADCAST_ADDR "192.168.5.255"
-#define MY_NODE_ID "1"
+#define MY_NODE_ID 1
 
-#pragma pack(1)
+
+unsigned char currentEventID = 0;
+// Mutex for synchronizing shared resources
+std::mutex queueMutex;
+std::mutex requestMutex;
+std::mutex jobMutex;
+std::mutex eventMutex;
+
+void updateEvent(std::string type)
+{
+    std::lock_guard<std::mutex> lock(eventMutex);
+    currentEventID++;
+    std::cout << MY_NODE_ID << ":" << MY_NODE_ID << "." << currentEventID <<  '\t' << type << std::endl;
+}
+
+void updateEvent(std::string type, Message& msg)
+{
+    std::lock_guard<std::mutex> lock(eventMutex);
+    if(msg.eventID > currentEventID)
+        currentEventID = msg.eventID;
+    currentEventID++;
+    std::cout << MY_NODE_ID << ":" << MY_NODE_ID << "." << currentEventID <<  '\t' << type << std::endl;
+}
 
 void log(const char* message);
 
@@ -28,7 +53,7 @@ class Message
 {
     public:
         bool isACK = true;/*true->send acknowledgement/ false->receive acknowledgement*/
-        char processID[4];
+        unsigned short int processID;
         unsigned char eventID = 0;
         
     Message(char* type)
@@ -39,11 +64,11 @@ class Message
             isACK = false;
         else
         {
-            std::cerr << "Error: Invalid request type at line number " << __LINE__ << "." << std::endl;
-            std::cerr << "Error: Deleting current object." << std::endl;
-            this->~Message();
-            //exit(EXIT_FAILURE);
+            std::string errorMessage = "Error: Invalid request type at line number " + std::to_string(__LINE__) + ".";
+            throw std::invalid_argument(errorMessage);
         }
+        eventID = currentEventID;
+        processID = MY_NODE_ID;
     }
 };
 struct Node
@@ -54,6 +79,7 @@ struct Node
 
     Node(const Message& m) : next(nullptr), ackCount(0), msg(m){}
 };
+
 
 /*Use this for managing generated nodes*/
 class PriorityQueue
@@ -86,6 +112,7 @@ public:
 
     void enqueue(const Message& msg)
     {
+        std::lock_guard<std::mutex> lock(queueMutex);
         Node* newNode = new Node(msg);
 
         if (front == nullptr)
@@ -142,6 +169,7 @@ public:
 
     Message popFront()
     {
+        std::lock_guard<std::mutex> lock(queueMutex);
         if (front == nullptr)
         {
             throw std::runtime_error("Queue is empty!");
@@ -160,6 +188,7 @@ public:
 
     Node peekFront()
     {
+        std::lock_guard<std::mutex> lock(queueMutex);
         if (front == nullptr)
             throw std::runtime_error("Queue is empty!");
         return *front;
@@ -192,6 +221,7 @@ class Queue
         // Enqueue — add to the rear
         void enqueue(Message msg)
         {
+            std::lock_guard<std::mutex> lock(jobMutex);
             Node* newNode = new Node(msg);
             if (rear == nullptr)
             {
@@ -205,18 +235,23 @@ class Queue
         }
 
         // Dequeue — remove from the front
-        Message dequeue()
+        Message* dequeue()
         {
-            Node* temp = front;
-            Message msg = temp->msg;
+            std::lock_guard<std::mutex> lock(jobMutex);
+            if(!isQueueEmpty())
+            {
+                Node* temp = front;
+                Message* msg = new Message("ACK");
+                *msg = temp->msg;
+                front = front->next;
 
-            front = front->next;
+                if (front == nullptr)
+                    rear = nullptr;
 
-            if (front == nullptr)
-                rear = nullptr;
-
-            delete temp;
-            return msg;
+                delete temp;
+                return msg;
+            }
+            return nullptr;
         }
 
         ~Queue()
@@ -228,19 +263,42 @@ class Queue
 
 
 int clientPort = 0;
-volatile unsigned char currentEventID = 0;
-int noOfRequests = 3;
+
+int noOfRequests = 0;
 std::unordered_map<std::string, Node*>MyRequests;
+volatile bool exitThread = false;
 PriorityQueue RequestQueue;
 Queue JobQueue;
-char* serverIPs[NUMBER_OF_CONNECTIONS] = {"127.0.0.1", "127.0.0.2"};
+
+void pushHashMap(Node* newNode)
+{
+    std::lock_guard<std::mutex> lock(requestMutex);
+    std::string key = std::to_string(newNode->msg.processID) + "." + std::to_string(newNode->msg.eventID);
+    MyRequests[key] = newNode;
+}
+
+void popHashMap(std::string key)
+{
+    std::lock_guard<std::mutex> lock(requestMutex);
+    auto node = MyRequests.find(key);
+    if(node != MyRequests.end()) MyRequests.erase(key);
+}
+
+Node* peekHashMap(std::string key)
+{
+    std::lock_guard<std::mutex> lock(requestMutex);
+    auto node = MyRequests.find(key);
+    if(node != MyRequests.end()) return node->second;
+    return nullptr;
+}
 
 void log(const char* message)
 {
-#if ENABLE_LOGS
-    std::cout << message << std::endl;
-#else
-#endif
+    #if ENABLE_LOGS
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::cout << "[" << std::ctime(&now_time) << "] " << message << std::endl;
+    #endif
 }
 
 /*UDP send message*/
@@ -248,10 +306,10 @@ void log(const char* message)
 /*If sending Msg.ACK then use a set and retransmit the message until 4 different ACKs are received*/
 void sendMessage(int clientSocket, Message msg)
 {
-    std::set<char*> recepientSet;
-    char bytes[13];
+    std::set<std::string> recepientSet;
+    char ackBuffer[13];
     int retryCount = 0;
-    char* currentRound = msg.processID + '.' + msg.eventID;
+    std::string currentRound = std::to_string(msg.processID) + "." + std::to_string(msg.eventID);
     struct sockaddr_in clientAddr{};
     socklen_t addrLen = sizeof(clientAddr);
     clientAddr.sin_family = AF_INET;                                            /*Send messages to IPv4 family*/
@@ -266,20 +324,25 @@ void sendMessage(int clientSocket, Message msg)
     while(true)
     {
         retryCount++;
+        int broadcast = 1;
+        setsockopt(clientSocket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
         int sentbytes = sendto(clientSocket, &msg, sizeof(msg), 0, (const struct sockaddr *)&clientAddr, sizeof(clientAddr));
         if(sentbytes < 0)
+        {
+            perror("Error in sending data");
             continue;
+        }
 
         auto start = std::chrono::steady_clock::now();
 
         if(!msg.isACK)
         {
-            while(recepientSet.size() < 0)
+            while(true)
             {
-                recvfrom(clientSocket, &bytes, 13, 0, (struct sockaddr*)&clientAddr, &addrLen);
-                if(strncmp(bytes, currentRound, strlen(currentRound)) == 0)
+                recvfrom(clientSocket, &ackBuffer, 13, 0, (struct sockaddr*)&clientAddr, &addrLen);
+                if(strncmp(ackBuffer, currentRound.c_str(), strlen(currentRound.c_str())) == 0)
                 {
-                    recepientSet.insert(bytes);
+                    recepientSet.insert(ackBuffer);
                 }
                 else
                 {
@@ -295,7 +358,7 @@ void sendMessage(int clientSocket, Message msg)
                 // Calculate elapsed time in seconds
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
 
-                if(elapsed >= 3)
+                if(elapsed >= TIMEOUT_DURATION)
                 {
                     std::cerr << "Timeout for " << currentRound << std::endl;
                     break;
@@ -306,8 +369,8 @@ void sendMessage(int clientSocket, Message msg)
         {
             while(true)
             {
-                recvfrom(clientSocket, &bytes, 13, 0, (struct sockaddr*)&clientAddr, &addrLen);
-                if(strncmp(bytes, currentRound, strlen(currentRound)) == 0)
+                recvfrom(clientSocket, &ackBuffer, 13, 0, (struct sockaddr*)&clientAddr, &addrLen);
+                if(strncmp(ackBuffer, currentRound.c_str(), strlen(currentRound.c_str())) == 0)
                 {
                     return;
                 }
@@ -322,16 +385,18 @@ void sendMessage(int clientSocket, Message msg)
                 // Calculate elapsed time in seconds
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
 
-                if(elapsed >= 3)
+                if(elapsed >= TIMEOUT_DURATION)
                 {
                     std::cerr << "Timeout for " << currentRound << std::endl;
                     break;
                 }
             }
         }
-        if(retryCount == 3)
+        if(retryCount == RETRY_LIMIT)
         {
             std::cerr << "Reached maximum number of retries(3) for the event ACK->" << currentRound << std::endl;
+            std::cerr << "Node may be unreachable" << std::endl;
+            recepientSet.clear();
             break;
         }
     }
@@ -359,52 +424,26 @@ Message receiveMessage(int serverSocket)
 
     while(true)
     {
-        if(retryCount >= 3)
+        if(retryCount >= RETRY_LIMIT)
         {
             std::cerr << "Max retry count reached for receiving message, aborting program execution" << std::endl;
             exit(EXIT_FAILURE);
         }
-        int receivedBytes = recvfrom(serverSocket, &msg, sizeof(msg), 0, (struct sockaddr*)&serverAddr, &addrLen);
+        struct sockaddr_in myAddr{};
+        socklen_t myAddrLen = sizeof(myAddr);
+        int receivedBytes = recvfrom(serverSocket, &msg, sizeof(msg), 0, (struct sockaddr*)&myAddr, &myAddrLen);
         if(receivedBytes < 0)
         {
-            std::cerr << "error is receiving message" << std::endl;
+            perror("Error in receiving message");
             retryCount++;
             continue;
         }
         else
         {
-            confirmationMessage = msg.processID+'.'+msg.eventID+'A'+'C'+'K';
+            confirmationMessage = std::to_string(msg.processID) + "." + std::to_string(msg.eventID) + "_ACK";
             sendto(serverSocket, &confirmationMessage, strlen(confirmationMessage.c_str()), 0, (struct sockaddr*)&serverAddr, addrLen);
         }
     }
-}
-
-/*Extracting node ID, send 0xFFFF if server IP is invalid*/
-int extractNodeID(const char* serverIP)
-{
-    char* nodeID = (char*)calloc(4, 1);
-    nodeID[strlen(nodeID)] = '\0';
-    unsigned char startIndex;
-    unsigned char pattern = '.';
-    int nodeId = 0;
-    for(int i = strlen(serverIP) - 1; i > 0; i--)
-    {
-        if((i == 0) && (serverIP[0] != pattern))
-            std::cerr << "Error: Invalid server IP" << std::endl;
-        if(serverIP[i] == pattern)
-        {
-            for(int j = i+1; serverIP[j] != '\0'; j++)
-                nodeID[j-(i+1)] = serverIP[j];
-            break;
-        }
-    }
-    
-    if(*nodeID != '\0')
-        for(int i = 0; i < strlen(nodeID); i++)
-            nodeId = nodeId*10 + (nodeID[i] - 48);
-    else
-        nodeId = 0xFFFF;
-    return nodeId;
 }
 
 /*For requesting REQs and sending ACKs*/
@@ -415,19 +454,21 @@ void* ClientThread(void* arg)
     int clientSocket = *((int*)arg);
     while(true)
     {
-        if(JobQueue.isQueueEmpty())
-            continue;
-        else
+        Message* msg = JobQueue.dequeue();
+        if(msg != nullptr)
         {
-            Message msg = JobQueue.dequeue();
-            if(strcmp(msg.processID, MY_NODE_ID) != 0)
+            if(msg->processID != MY_NODE_ID)
             {
-                msg.isACK = true;
-                sendMessage(clientSocket, msg);
+                msg->isACK = true;
+                sendMessage(clientSocket, *msg);
+                updateEvent("SEND");
             }
-            std::cout << MY_NODE_ID << ":" << msg.processID << "." << msg.eventID << std::endl;
+            std::cout << MY_NODE_ID << ":" << msg->processID << "." << msg->eventID << std::endl;
         }
+        if(exitThread)
+            break;
     }
+    return nullptr;
 }
 
 /*Listening to responses, creating hashes for received messages and checking if they are required or not*/
@@ -444,15 +485,18 @@ void* ServerThread(void* arg)
     Message msg("ACK");
     while (true) {
         Message msg = receiveMessage(serverSocket);
+        std::string type = "RECEIVE";
+        updateEvent(type, &msg);
         /*Check if the process ID belongs to this node*/
         /*create a hash and check if the message is in hashmap*/
         /*If the message is of type ACK then check if the server ID */
         if(msg.isACK == false)
         {
-            if(strcmp(msg.processID, MY_NODE_ID) == 0)
+            if(msg.processID == MY_NODE_ID)
             {
-                Node* myRequest = MyRequests[msg.processID+'.'+msg.eventID];
-                if(myRequest->ackCount < 3)
+                std::string key = std::to_string(msg.processID) + "." + std::to_string(msg.eventID);
+                Node* myRequest = peekHashMap(key);
+                if(myRequest->ackCount < NUMBER_OF_CONNECTIONS)
                     myRequest->ackCount++;
             }
             else
@@ -460,6 +504,8 @@ void* ServerThread(void* arg)
                 RequestQueue.enqueue(msg);
             }
         }
+        if(exitThread)
+            break;
     }
     return nullptr;
 }
@@ -476,15 +522,19 @@ void* MessageDelivery(void* ptr)
         else
         {
             Node topNode = RequestQueue.peekFront();
-            if((strcmp(topNode.msg.processID, MY_NODE_ID) == 0) && (topNode.ackCount >= 3))
+            if((topNode.msg.processID == MY_NODE_ID) && (topNode.ackCount >= NUMBER_OF_CONNECTIONS))
             {
+                std::string key = std::to_string(topNode.msg.processID)+"."+std::to_string(topNode.msg.eventID);
+                popHashMap(key);
                 JobQueue.enqueue(RequestQueue.popFront());
             }
-            else if(strcmp(topNode.msg.processID, MY_NODE_ID) != 0)
+            else if(topNode.msg.processID != MY_NODE_ID)
             {
                 JobQueue.enqueue(RequestQueue.popFront());
             }
         }
+        if(exitThread)
+            break;
     }
     return nullptr;
 }
@@ -520,7 +570,6 @@ void waitForMinute()
 int main() {
     int clientSocket, serverSocket;
     struct sockaddr_in serverAddr{};
-    char buffer[BUFFER_SIZE];
 
     serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if(serverSocket < 0)
@@ -570,8 +619,6 @@ int main() {
     std::cout << "Server is hosted on the port: " << PORT << std::endl;
 
     pthread_t clientThread, serverThread, messageDelivery;
-    int clientThreadID, serverThreadID, messageDeliveryID;
-
     using namespace std::chrono;
 
     waitForMinute();
@@ -585,16 +632,19 @@ int main() {
         if(RequestQueue.isQueueEmpty())
         {
             Message msg("REQ");
-            strcpy(msg.processID, MY_NODE_ID);
-            currentEventID++;
+            Node* newNode = new Node(msg);
+            pushHashMap(newNode);
+            updateEvent("ISSUE");
+            noOfRequests++;
         }
 
-        if(currentEventID == 3)
+        if(currentEventID == NUMBER_OF_REQUESTS)
         {
+            exitThread = true;
             break;
         }
     }
-    while((noOfRequests > 0) && RequestQueue.isQueueEmpty() && JobQueue.isQueueEmpty());
+    while((noOfRequests < NUMBER_OF_REQUESTS) && RequestQueue.isQueueEmpty() && JobQueue.isQueueEmpty());
 
     pthread_join(messageDelivery, nullptr);
     pthread_join(clientThread, nullptr);
