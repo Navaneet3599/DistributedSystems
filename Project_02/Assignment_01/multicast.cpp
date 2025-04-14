@@ -20,8 +20,8 @@
 #define NUMBER_OF_REQUESTS 3
 #define RETRY_LIMIT 3
 #define TIMEOUT_DURATION 3
-#define BROADCAST_ADDR "192.168.5.255"
-#define MY_NODE_ID 1
+#define BROADCAST_ADDR "192.168.1.255"
+#define MY_NODE_ID 20
 
 
 unsigned char currentEventID = 0;
@@ -31,21 +31,7 @@ std::mutex requestMutex;
 std::mutex jobMutex;
 std::mutex eventMutex;
 
-void updateEvent(std::string type)
-{
-    std::lock_guard<std::mutex> lock(eventMutex);
-    currentEventID++;
-    std::cout << MY_NODE_ID << ":" << MY_NODE_ID << "." << currentEventID <<  '\t' << type << std::endl;
-}
 
-void updateEvent(std::string type, Message& msg)
-{
-    std::lock_guard<std::mutex> lock(eventMutex);
-    if(msg.eventID > currentEventID)
-        currentEventID = msg.eventID;
-    currentEventID++;
-    std::cout << MY_NODE_ID << ":" << MY_NODE_ID << "." << currentEventID <<  '\t' << type << std::endl;
-}
 
 void log(const char* message);
 
@@ -56,11 +42,11 @@ class Message
         unsigned short int processID;
         unsigned char eventID = 0;
         
-    Message(char* type)
+    Message(std::string type)
     {
-        if(strcmp(type, "ACK") == 0)
+        if(type == "ACK")
             isACK = true;
-        else if(strcmp(type, "REQ") == 0)
+        else if(type == "REQ")
             isACK = false;
         else
         {
@@ -269,6 +255,22 @@ std::unordered_map<std::string, Node*>MyRequests;
 volatile bool exitThread = false;
 PriorityQueue RequestQueue;
 Queue JobQueue;
+
+void updateEvent(std::string type)
+{
+    std::lock_guard<std::mutex> lock(eventMutex);
+    currentEventID++;
+    std::cout << MY_NODE_ID << ":" << MY_NODE_ID << "." << currentEventID <<  '\t' << type << std::endl;
+}
+
+void updateReqEvent(std::string type, Message msg)
+{
+    std::lock_guard<std::mutex> lock(eventMutex);
+    if(msg.eventID > currentEventID)
+        currentEventID = msg.eventID;
+    currentEventID++;
+    std::cout << MY_NODE_ID << ":" << MY_NODE_ID << "." << currentEventID <<  '\t' << type << std::endl;
+}
 
 void pushHashMap(Node* newNode)
 {
@@ -486,7 +488,7 @@ void* ServerThread(void* arg)
     while (true) {
         Message msg = receiveMessage(serverSocket);
         std::string type = "RECEIVE";
-        updateEvent(type, &msg);
+        updateReqEvent(type, msg);
         /*Check if the process ID belongs to this node*/
         /*create a hash and check if the message is in hashmap*/
         /*If the message is of type ACK then check if the server ID */
