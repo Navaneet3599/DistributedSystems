@@ -16,15 +16,16 @@
 
 #define PORT 8080
 #define ENABLE_LOGS true
-#define NUMBER_OF_CONNECTIONS 3
+#define NUMBER_OF_CONNECTIONS 2
 #define NUMBER_OF_REQUESTS 3
 #define RETRY_LIMIT 3
 #define TIMEOUT_DURATION 3
-#define BROADCAST_ADDR "192.168.1.255"
+#define BROADCAST_ADDR "192.168.1.83"
 #define MY_NODE_ID 20
+#define BUFFER_SIZE 32
 
 
-unsigned char currentEventID = 0;
+int currentEventID = 0;
 // Mutex for synchronizing shared resources
 std::mutex queueMutex;
 std::mutex requestMutex;
@@ -33,7 +34,7 @@ std::mutex eventMutex;
 
 
 
-void log(const char* message);
+void log(std::string message);
 
 class Message
 {
@@ -42,6 +43,7 @@ class Message
         unsigned short int processID;
         unsigned char eventID = 0;
         
+    Message() = default;
     Message(std::string type)
     {
         if(type == "ACK")
@@ -294,12 +296,10 @@ Node* peekHashMap(std::string key)
     return nullptr;
 }
 
-void log(const char* message)
+void log(std::string message)
 {
     #if ENABLE_LOGS
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-    std::cout << "[" << std::ctime(&now_time) << "] " << message << std::endl;
+    std::cout << message << std::endl;
     #endif
 }
 
@@ -308,8 +308,9 @@ void log(const char* message)
 /*If sending Msg.ACK then use a set and retransmit the message until 4 different ACKs are received*/
 void sendMessage(int clientSocket, Message msg)
 {
+    log("Entered send message function");
     std::set<std::string> recepientSet;
-    char ackBuffer[13];
+    char ackBuffer[BUFFER_SIZE];
     int retryCount = 0;
     std::string currentRound = std::to_string(msg.processID) + "." + std::to_string(msg.eventID);
     struct sockaddr_in clientAddr{};
@@ -322,12 +323,31 @@ void sendMessage(int clientSocket, Message msg)
         std::cerr << "Broadcast address specification failed at line number " << __LINE__ << std::endl;
         exit(EXIT_FAILURE);
     }
+    else
+    {
+        log("Broadcast address specification is valid");
+    }
 
     while(true)
     {
         retryCount++;
         int broadcast = 1;
-        setsockopt(clientSocket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+        if(retryCount == (RETRY_LIMIT+1))
+        {
+            std::cerr << "Reached maximum number of retries(3) for the event ACK->" << currentRound << std::endl;
+            std::cerr << "Node may be unreachable" << std::endl;
+            recepientSet.clear();
+            break;
+        }
+        if(setsockopt(clientSocket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) < 0)
+        {
+            perror("Error enabling broadcast for sending messages");
+            exit(EXIT_FAILURE);
+        }
+        else
+        {
+            log("Broadcast option has been set");
+        }
         int sentbytes = sendto(clientSocket, &msg, sizeof(msg), 0, (const struct sockaddr *)&clientAddr, sizeof(clientAddr));
         if(sentbytes < 0)
         {
@@ -335,13 +355,17 @@ void sendMessage(int clientSocket, Message msg)
             continue;
         }
 
+        log("Sent message "+std::to_string(msg.processID)+"."+std::to_string(msg.eventID));
+
         auto start = std::chrono::steady_clock::now();
 
         if(!msg.isACK)
         {
             while(true)
             {
-                recvfrom(clientSocket, &ackBuffer, 13, 0, (struct sockaddr*)&clientAddr, &addrLen);
+                recvfrom(clientSocket, &ackBuffer, BUFFER_SIZE, 0, (struct sockaddr*)&clientAddr, &addrLen);
+                char* receivedFrom = inet_ntoa(clientAddr.sin_addr);
+                log("---Received ACK from "+std::string(receivedFrom));
                 if(strncmp(ackBuffer, currentRound.c_str(), strlen(currentRound.c_str())) == 0)
                 {
                     recepientSet.insert(ackBuffer);
@@ -371,7 +395,7 @@ void sendMessage(int clientSocket, Message msg)
         {
             while(true)
             {
-                recvfrom(clientSocket, &ackBuffer, 13, 0, (struct sockaddr*)&clientAddr, &addrLen);
+                recvfrom(clientSocket, &ackBuffer, BUFFER_SIZE, 0, (struct sockaddr*)&clientAddr, &addrLen);
                 if(strncmp(ackBuffer, currentRound.c_str(), strlen(currentRound.c_str())) == 0)
                 {
                     return;
@@ -394,13 +418,6 @@ void sendMessage(int clientSocket, Message msg)
                 }
             }
         }
-        if(retryCount == RETRY_LIMIT)
-        {
-            std::cerr << "Reached maximum number of retries(3) for the event ACK->" << currentRound << std::endl;
-            std::cerr << "Node may be unreachable" << std::endl;
-            recepientSet.clear();
-            break;
-        }
     }
 }
 
@@ -410,6 +427,7 @@ void sendMessage(int clientSocket, Message msg)
 /*If received message is Msg.ACK then send ACK and update in received messages*/
 Message receiveMessage(int serverSocket)
 {
+    log("Entered receive message function");
     struct sockaddr_in serverAddr{};
     Message msg("ACK");
     socklen_t addrLen = sizeof(serverAddr);
@@ -443,9 +461,12 @@ Message receiveMessage(int serverSocket)
         else
         {
             confirmationMessage = std::to_string(msg.processID) + "." + std::to_string(msg.eventID) + "_ACK";
+            log("Received message "+confirmationMessage);
             sendto(serverSocket, &confirmationMessage, strlen(confirmationMessage.c_str()), 0, (struct sockaddr*)&serverAddr, addrLen);
+            break;
         }
     }
+    return msg;
 }
 
 /*For requesting REQs and sending ACKs*/
@@ -454,6 +475,7 @@ Message receiveMessage(int serverSocket)
 void* ClientThread(void* arg)
 {
     int clientSocket = *((int*)arg);
+    log("Entered client thread");
     while(true)
     {
         Message* msg = JobQueue.dequeue();
@@ -463,6 +485,7 @@ void* ClientThread(void* arg)
             {
                 msg->isACK = true;
                 sendMessage(clientSocket, *msg);
+                delete msg;
                 updateEvent("SEND");
             }
             std::cout << MY_NODE_ID << ":" << msg->processID << "." << msg->eventID << std::endl;
@@ -481,6 +504,7 @@ void* ClientThread(void* arg)
 /*Ack.!self --> discard*/
 void* ServerThread(void* arg)
 {
+    log("Entered server thread");
     int serverSocket = *((int*)arg);
     struct sockaddr_in clientAddr;
     socklen_t clientAddrLen = sizeof(clientAddr);
@@ -498,7 +522,7 @@ void* ServerThread(void* arg)
             {
                 std::string key = std::to_string(msg.processID) + "." + std::to_string(msg.eventID);
                 Node* myRequest = peekHashMap(key);
-                if(myRequest->ackCount < NUMBER_OF_CONNECTIONS)
+                if((myRequest!= nullptr) && (myRequest->ackCount < NUMBER_OF_CONNECTIONS))
                     myRequest->ackCount++;
             }
             else
@@ -517,6 +541,7 @@ void* ServerThread(void* arg)
 /*Req.!self--> Place in JobQueue*/
 void* MessageDelivery(void* ptr)
 {
+    log("Entered message delivery thread");
     while(true)
     {
         if(RequestQueue.isQueueEmpty())
@@ -597,8 +622,14 @@ int main() {
         perror("Error in setting broadcast option");
         exit(EXIT_FAILURE);
     }
+
     struct sockaddr_in clientAddr;
     socklen_t addrLen = sizeof(clientAddr);
+    if(bind(clientSocket, (struct sockaddr*)&clientAddr, sizeof(clientAddr)) < 0)
+    {
+        perror("Bind failed");
+        exit(EXIT_FAILURE);
+    }
     if(getsockname(clientSocket, (struct sockaddr*)&clientAddr, &addrLen) == -1) {
         std::cerr << "getsockname() failed\n";
         close(clientSocket);
@@ -638,6 +669,7 @@ int main() {
             pushHashMap(newNode);
             updateEvent("ISSUE");
             noOfRequests++;
+            sendMessage(clientSocket, msg);
         }
 
         if(currentEventID == NUMBER_OF_REQUESTS)
