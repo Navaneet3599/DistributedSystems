@@ -24,6 +24,7 @@
 #define MCAST_PORT 12345
 #define UNICAST_PORT 12346
 #define BUFFER_SIZE 32
+#define NUMBER_OF_ROUNDS 3
 
 
 
@@ -156,8 +157,9 @@ std::condition_variable cv;
 bool isCoordinator = false;
 bool receivedPrepare = false;
 bool decisionRequest = false;
+bool decisionRequestTermination = false;
 int currentTransactionID = 0;
-int noOfRequests = 0;
+int noOfRequests = 1;
 bool decisionReached = false;
 bool requestsCompleted = false;
 Logger localLog;
@@ -217,10 +219,12 @@ void waitForMinute()
 void sendMessage(argStruct socketAttr, Message msg)
 {
     NetMessage netMsg{};
+    socklen_t sendAddrlen = sizeof(socketAttr.addr);
     netMsg.isCoordinator = msg.isCoordinator;
     netMsg.transactionID = msg.transactionID;
-    strncpy(netMsg.message, msg.message.c_str(), BUFFER_SIZE);
-    int sentbytes = sendto(socketAttr.socket, &netMsg, sizeof(netMsg), 0, (sockaddr*)&socketAttr.addr, sizeof(struct sockaddr));
+    strncpy(netMsg.message, msg.message.c_str(), BUFFER_SIZE-1);
+    netMsg.message[BUFFER_SIZE - 1] = '\0';
+    int sentbytes = sendto(socketAttr.socket, &netMsg, sizeof(netMsg), 0, (sockaddr*)&socketAttr.addr, sendAddrlen);
 
     if(sentbytes < 0)
     {
@@ -238,17 +242,14 @@ sockaddr_in receiveMessage(argStruct socketAttr, Message* msg)
     std::string currentState = localLog.read();
     while(true)
     {
-        currentState = localLog.read();
+        //Thread exit condition
+        /*if((noOfRequests > NUMBER_OF_ROUNDS) && (msg->message == "IDLE"))
         {
-            //Thread exit condition
-            if((noOfRequests == 3) && (currentState == "IDLE"))
-            {
-                msg->message = "EXIT";
-                break;
-            }
-        }
+            msg->message = "EXIT";
+            break;
+        }*/
 
-        if((msg->message == "INIT") && (waitTimeout(1, start))) break;
+        if((!isCoordinator) && (msg->message == "INIT") && (waitTimeout(1, start))) break;
         
         socklen_t senderAddrLen = sizeof(senderAddr);
         NetMessage netMsg{};
@@ -261,7 +262,7 @@ sockaddr_in receiveMessage(argStruct socketAttr, Message* msg)
             {
                 if(waitTimeout(3, start))
                 {
-                    msg->isCoordinator = true;
+                    msg->isCoordinator = true;//CHeck......................
                     msg->message = "GLOBAL_ABORT";
                     break;
                 }
@@ -370,12 +371,20 @@ void globalDecisionSeeThrough(threadArg threadArguments, std::string decision)
             break;
         }
 
-        sockaddr_in recvAddr = receiveMessage(threadArguments.mcast, &msg);
+        debugLog("Coordinator: Listening on PORT(" + std::to_string(ntohs(threadArguments.ucast.addr.sin_port))+"), ADDR("+inet_ntoa(threadArguments.ucast.addr.sin_addr)+")");
+        sockaddr_in recvAddr = receiveMessage(threadArguments.ucast, &msg);
         if(msg.message == "ACK")
         {
+            char ipStr[INET_ADDRSTRLEN];  // Buffer for IPv4 string
+            if (inet_ntop(AF_INET, &(recvAddr.sin_addr), ipStr, INET_ADDRSTRLEN) == nullptr)
+            {
+                perror("inet_ntop");
+            }
+            debugLog("Coordinator: Received ACK from "+std::string(ipStr));
             askForVotes.erase(std::string(inet_ntoa(recvAddr.sin_addr)));
             if(askForVotes.size() == 0)
             {
+                debugLog("Coordinator: Received all ACKs");
                 break;
             }
         }
@@ -389,24 +398,195 @@ void* decisionRequestThread(void* arg)
     while(true)
     {
         std::unique_lock<std::mutex> lock(decisionRequestMtx);
-        cv.wait(lock, []{return decisionRequest;});
-        debugLog("Decision request thread got invoked");
-        threadArguments.ucast.addr = decisionRequestingIP;
-        Message msg;
-        
-        std::string fromLog = localLog.read();
-        if(fromLog == "GLOBAL_COMMIT")
+        cv.wait(lock, []{return (decisionRequest|decisionRequestTermination);});
+        if(decisionRequest)
         {
-            msg.message = fromLog;
-            sendMessage(threadArguments.ucast, msg);
+            debugLog("Participant: Decision request thread got invoked");
+            threadArguments.ucast.addr = decisionRequestingIP;
+            Message msg;
+            
+            std::string fromLog = localLog.read();
+            if(fromLog == "GLOBAL_COMMIT")
+            {
+                msg.message = fromLog;
+                sendMessage(threadArguments.ucast, msg);
+            }
+            else if((fromLog == "INIT")||((fromLog == "GLOBAL_ABORT")))
+            {
+                msg.message = "GLOBAL_ABORT";
+                sendMessage(threadArguments.ucast, msg);
+            }
+            decisionRequest = false;
         }
-        else if((fromLog == "INIT")||((fromLog == "GLOBAL_ABORT")))
-        {
-            msg.message = "GLOBAL_ABORT";
-            sendMessage(threadArguments.ucast, msg);
-        }
-        decisionRequest = false;
+        if(decisionRequestTermination)
+            break;
     }
+    return nullptr;
+}
+
+/*PARTICIPANT thread*/
+void* participantThread(void* ptr)
+{
+    threadArg threadArguments = *(threadArg*)ptr;
+    std::string currentState = "INIT_P";
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+    bool crashed = true;
+    Message msg;
+    while(true)
+    {
+        if(msg.message == "EXIT")
+        {
+            debugLog("Processing exit");
+            break;
+        }
+        
+        switch (StateDescription[currentState])
+        {
+            case 1://INIT
+            {//Implement DECISION_REQUEST servicing
+                localLog.log("INIT");
+                debugLog("Participant: Entered INIT");
+                std::string previousState = localLog.read();
+                if(previousState == "READY")
+                {
+                    localLog.log("RECOVERING");
+                    currentState = requestingDecision(threadArguments);
+                    if(currentState != "")
+                        break;
+                }
+                
+                if(!receivedPrepare)
+                {
+                    localLog.log("INIT");
+                    msg.message = "INIT";
+
+                    sockaddr_in recvAddress = receiveMessage(threadArguments.mcast, &msg);
+                    
+                    threadArguments.ucast.addr.sin_addr = recvAddress.sin_addr;
+                    msg.isCoordinator = false;
+                    if(msg.message == "INIT")
+                    {
+                        currentState = "GLOBAL_ABORT";
+                        msg.message = "GLOBAL_ABORT";
+                        debugLog("Participant: Aborting INIT state due to timeout");
+                        //threadArguments.ucast.addr.sin_addr.s_addr = htonl(INADDR_ANY);//Participant will not transmit ABORT
+                    }
+                    else if(msg.message == "PREPARE")
+                    {
+                        currentState = "READY";
+                        debugLog("Participant: Received PREPARE, moving to READY state");
+                    }
+                }
+                else
+                {
+                    localLog.log("INIT");
+                    currentState = "READY";
+                    receivedPrepare = false;
+                }
+                break;
+            }
+            case 3://READY
+            {
+                localLog.log("READY");
+                //READY activities
+                msg;
+                msg.isCoordinator = false;
+                
+                if(((std::rand())%100)%7 == 0) msg.message = "VOTE_COMMIT";//Make this as VOTE_ABORT in future
+                else msg.message = "VOTE_COMMIT";
+                debugLog("Participant: About to reply to VOTE_REQUEST to coordinator");
+                threadArguments.ucast.addr.sin_addr.s_addr = inet_addr(COORDINATOR_IP);
+                sendMessage(threadArguments.ucast, msg);//Send local vote
+                debugLog("Participant: Sending message to PORT(" + std::to_string(ntohs(threadArguments.ucast.addr.sin_port))+"), ADDR("+inet_ntoa(threadArguments.ucast.addr.sin_addr)+")");
+                debugLog("Participant: Replied to VOTE_REQUEST and is awaiting GLOBAL command from coordinator");
+
+                while(true)
+                {
+                    sockaddr_in recvAddress = receiveMessage(threadArguments.mcast, &msg);
+                    if(msg.isCoordinator && ((msg.message == "GLOBAL_COMMIT") || (msg.message == "GLOBAL_ABORT")))
+                    {
+                        debugLog("Participant: Received GLOBAL decision from coordinator and will send ACK");
+                        currentState = msg.message;
+                        msg.isCoordinator = false;
+                        msg.message = "ACK";
+                        threadArguments.ucast.addr.sin_addr.s_addr = inet_addr(COORDINATOR_IP);
+                        sendMessage(threadArguments.ucast, msg);
+                        break;
+                    }
+                }
+                break;
+            }
+            case 4://GLOBAL_COMMIT
+            {
+                localLog.log("GLOBAL_COMMIT");
+                debugLog("Participant: Received GLOBAL_COMMIT");
+                msg;
+                msg.isCoordinator = false;
+                msg.message = "ACK";
+                threadArguments.ucast.addr.sin_addr.s_addr = inet_addr(COORDINATOR_IP);
+                debugLog("Participant: Sending message to PORT(" + std::to_string(ntohs(threadArguments.ucast.addr.sin_port))+"), ADDR("+inet_ntoa(threadArguments.ucast.addr.sin_addr)+")");
+                sendMessage(threadArguments.ucast, msg);
+
+                if(noOfRequests > NUMBER_OF_ROUNDS)
+                {
+                    msg.message = "EXIT";
+                    debugLog("EXITing loop");
+                }
+                currentState = "IDLE";
+                break;
+            }
+            case 5://GLOBAL_ABORT
+            {
+                localLog.log("GLOBAL_ABORT");
+                debugLog("Participant: Received GLOBAL_ABORT");
+                msg;
+                msg.isCoordinator = false;
+                msg.message = "ACK";
+                threadArguments.ucast.addr.sin_addr.s_addr = inet_addr(COORDINATOR_IP);
+                debugLog("Participant: Sending message to PORT(" + std::to_string(ntohs(threadArguments.ucast.addr.sin_port))+"), ADDR("+inet_ntoa(threadArguments.ucast.addr.sin_addr)+")");
+                sendMessage(threadArguments.ucast, msg);
+
+                if(noOfRequests > NUMBER_OF_ROUNDS)
+                {
+                    msg.message = "EXIT";
+                    debugLog("EXITing loop");
+                }
+                currentState = "IDLE";
+                break;
+            }
+            case 6://IDLE
+            {
+                debugLog(msg.message);
+                msg.message = "IDLE";
+                while(true)
+                {
+                    sockaddr_in recvAddr = receiveMessage(threadArguments.mcast, &msg);
+                    
+                    char ipStr[INET_ADDRSTRLEN];  // Buffer for IPv4 string
+                    if (inet_ntop(AF_INET, &(recvAddr.sin_addr), ipStr, INET_ADDRSTRLEN) == nullptr)
+                    {
+                        perror("inet_ntop");
+                    }
+                    if(msg.message == "PREPARE")
+                    {
+                        currentState = "INIT_P";
+                        receivedPrepare = true;
+                        debugLog("Participant: Received PREPARE in IDLE state");
+                        break;
+                    }
+                    else if((msg.message == "GLOBAL_COMMIT") || (msg.message == "GLOBAL_ABORT"))
+                    {
+                        msg.isCoordinator = false;
+                        msg.message = "ACK";
+                        debugLog("Participant: Received GLOBAL decision in IDLE state, most likely it is a case of lost ACK");
+                        sendMessage(threadArguments.mcast, msg);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    debugLog("Exiting participant thread");
     return nullptr;
 }
 
@@ -417,9 +597,9 @@ void* coordinatorThread(void* arg)
     std::string currentState = "INIT_C";
     bool crashed = true;
     //implement INIT(user input), WAIT(send VOTE_REQUEST), DECIDE(send GLOBAL_COMMIT/GLOBAL_ABORT, back to INIT)
+    Message msg;
     while (true)
     {
-        Message msg;
         switch(StateDescription[currentState])
         {
             case 0/*INIT_C*/:
@@ -428,8 +608,8 @@ void* coordinatorThread(void* arg)
                 msg.isCoordinator = true;
                 msg.message = "PREPARE";
                 sendMessage(threadArguments.mcast, msg);
-                debugLog("Coordinator send PREPARE");
-                noOfRequests++;
+                debugLog("Coordinator: Sent PREPARE");
+                
                 currentState = "WAIT";
                 break;
             }
@@ -439,7 +619,7 @@ void* coordinatorThread(void* arg)
                 msg.isCoordinator = true;
                 msg.message = "VOTE_REQUEST";
                 sendMessage(threadArguments.mcast, msg);
-                debugLog("Coordinator send VOTE_REQUEST");
+                debugLog("Coordinator: Sent VOTE_REQUEST");
                 
                 std::chrono::time_point<std::chrono::steady_clock> startTime = std::chrono::steady_clock::now();//For global abort
 
@@ -454,13 +634,20 @@ void* coordinatorThread(void* arg)
                         msg.isCoordinator = true;
                         msg.message = "GLOBAL_ABORT";
                         currentState = "GLOBAL_ABORT";
-                        debugLog("Coordinator issued a GLOBAL_ABORT(not enough votes)");
+                        debugLog("Coordinator: Issued a GLOBAL_ABORT(not enough votes)");
                         break;
                     }
 
-                    debugLog("Coordinator is about to receive VOTES");
+                    debugLog("Coordinator: About to receive VOTES");
+                    debugLog("Coordinator: Listening on PORT(" + std::to_string(ntohs(threadArguments.ucast.addr.sin_port))+"), ADDR("+inet_ntoa(threadArguments.ucast.addr.sin_addr)+")");
                     sockaddr_in recvAddr = receiveMessage(threadArguments.ucast, &msg);
-                    debugLog("Coordinator received: "+msg.message);
+                    char ipStr[INET_ADDRSTRLEN];  // Buffer for IPv4 string
+                    if (inet_ntop(AF_INET, &(recvAddr.sin_addr), ipStr, INET_ADDRSTRLEN) == nullptr)
+                    {
+                        perror("inet_ntop");
+                    }
+
+                    debugLog("Coordinator: Received -> "+msg.message+" from ->"+std::string(ipStr));
                     if((msg.message == "VOTE_COMMIT")||(msg.message == "VOTE_ABORT"))
                     {
                         askForVotes.erase(std::string(inet_ntoa(recvAddr.sin_addr)));
@@ -471,19 +658,20 @@ void* coordinatorThread(void* arg)
                             if(votes["VOTE_COMMIT"] == Participants.size())
                             {
                                 currentState = "GLOBAL_COMMIT";
+                                debugLog("Coordinator: Decided on global commit");
                             }
                             break;
                         }
                         else
                         {
-                            debugLog("Coordinator is still waiting for all votes");
+                            debugLog("Coordinator: Is still waiting for all votes");
                         }
                     }
 
                     status = waitTimeout(1, startTime);
                     if(status)
                     {
-                        debugLog("Coordinator didn't receive enough votes, retransmitting VOTE_REQUEST");
+                        debugLog("Coordinator: Didn't receive enough votes, retransmitting VOTE_REQUEST");
                         //Ask for votes from the participants who didn't vote for VOTE_REQUEST
                         for(const std::string& IP_str:askForVotes)
                         {
@@ -501,7 +689,8 @@ void* coordinatorThread(void* arg)
                             resend.message = "VOTE_REQUEST";
 
                             sendto(sendSocket, &resend, sizeof(resend), 0, (struct sockaddr*)&sendAddr, sizeof(sendAddr));
-                            debugLog("Sent VOTE_REQUEST(retransmission) to "+IP_str);
+                            close(sendSocket);
+                            debugLog("Coordinator: Sent VOTE_REQUEST(retransmission) to "+IP_str);
                         }
                     }
                 }
@@ -510,163 +699,48 @@ void* coordinatorThread(void* arg)
             case 4/*GLOBAL_COMMIT*/:
             {
                 localLog.log("GLOBAL_COMMIT");
+                debugLog("Coordinator: Will transmit GLOBAL_COMMIT and check for reception of ACKs");
                 globalDecisionSeeThrough(threadArguments, "GLOBAL_COMMIT");
-                debugLog("Decided on GLOBAL_COMMIT");
+                debugLog("Coordinator: Decided on GLOBAL_COMMIT");
                 sleep(1);
-                currentState = "INIT";
+                char flushMsg[128];
+                currentState = "INIT_C";
+                noOfRequests++;
+                while (true) {
+                    socklen_t addrLen = sizeof(threadArguments.ucast.addr);
+                    ssize_t bytesReceived = recvfrom(threadArguments.ucast.socket, &flushMsg, sizeof(flushMsg), 
+                                                    MSG_DONTWAIT, (struct sockaddr*)&threadArguments.ucast.addr, &addrLen);
+                    if (bytesReceived <= 0) {
+                        break;
+                    }
+                    debugLog("Coordinator: Flushed old message");
+                }
                 break;
             }
             case 5/*GLOBAL_ABORT*/:
             {
                 localLog.log("GLOBAL_ABORT");
+                debugLog("Coordinator: Will transmit GLOBAL_ABORT and check for reception of ACKs");
                 globalDecisionSeeThrough(threadArguments, "GLOBAL_ABORT");
-                debugLog("Decided on GLOBAL_ABORT");
+                debugLog("Coordinator: Decided on GLOBAL_ABORT");
                 sleep(1);
-                currentState = "INIT";
-                break;
-            }
-        }
-        if(noOfRequests == 3)
-            break;
-    }
-    return nullptr;
-}
-
-/*PARTICIPANT thread*/
-void* participantThread(void* ptr)
-{
-    threadArg threadArguments = *(threadArg*)ptr;
-    std::string currentState = "INIT_P";
-    std::srand(static_cast<unsigned int>(std::time(nullptr)));
-    bool crashed = true;
-    while(true)
-    {
-        if(noOfRequests == 3)
-            break;
-        Message msg;
-        switch (StateDescription[currentState])
-        {
-            case 1://INIT
-            {//Implement DECISION_REQUEST servicing
-                localLog.log("INIT");
-                debugLog("Participant entered INIT");
-                std::string previousState = localLog.read();
-                if(previousState == "READY")
-                {
-                    localLog.log("RECOVERING");
-                    currentState = requestingDecision(threadArguments);
-                    if(currentState != "")
-                        break;
-                }
-                
-                if(!receivedPrepare)
-                {
-                    localLog.log("INIT");
-                    msg.message = "INIT";
-
-                    sockaddr_in recvAddress = receiveMessage(threadArguments.mcast, &msg);
-                    
-                    threadArguments.ucast.addr = recvAddress;
-                    msg.isCoordinator = false;
-                    if(msg.message == "INIT")
-                    {
-                        currentState = "GLOBAL_ABORT";
-                        msg.message = "GLOBAL_ABORT";
-                        debugLog("Participant aborting INIT state due to timeout");
-                        //threadArguments.ucast.addr.sin_addr.s_addr = htonl(INADDR_ANY);//Participant will not transmit ABORT
-                    }
-                    else if(msg.message == "PREPARE")
-                    {
-                        currentState = "READY";
-                        debugLog("Participant received PREPARE, moving to READY state");
-                    }
-                }
-                else
-                {
-                    localLog.log("INIT");
-                    currentState = "READY";
-                    receivedPrepare = false;
-                }
-                break;
-            }
-            case 3://READY
-            {
-                localLog.log("READY");
-                //READY activities
-                Message msg;
-                msg.isCoordinator = false;
-                
-                if(((std::rand())%100)%7 == 0) msg.message = "VOTE_COMMIT";//Make this as VOTE_ABORT in future
-                else msg.message = "VOTE_COMMIT";
-                debugLog("Participant is about to reply to VOTE_REQUEST to coordinator");
-                sendMessage(threadArguments.ucast, msg);//Send local vote
-                debugLog("Participant replied to VOTE_REQUEST and is awaiting GLOBAL command from coordinator");
-
-                while(true)
-                {
-                    sockaddr_in recvAddress = receiveMessage(threadArguments.mcast, &msg);
-                    if(msg.isCoordinator && ((msg.message == "GLOBAL_COMMIT") || (msg.message == "GLOBAL_ABORT")))
-                    {
-                        debugLog("Participant received GLOBAL decision from coordinator and will send ACK");
-                        currentState = msg.message;
-                        msg.isCoordinator = false;
-                        msg.message = "ACK";
-                        sendMessage(threadArguments.ucast, msg);
+                char flushMsg[128];
+                currentState = "INIT_C";
+                noOfRequests++;
+                while (true) {
+                    socklen_t addrLen = sizeof(threadArguments.ucast.addr);
+                    ssize_t bytesReceived = recvfrom(threadArguments.ucast.socket, &flushMsg, sizeof(flushMsg), 
+                                                    MSG_DONTWAIT, (struct sockaddr*)&threadArguments.ucast.addr, &addrLen);
+                    if (bytesReceived <= 0) {
                         break;
                     }
-                }
-                break;
-            }
-            case 4://GLOBAL_COMMIT
-            {
-                localLog.log("GLOBAL_COMMIT");
-                debugLog("Participant received GLOBAL_COMMIT");
-                Message msg;
-                msg.isCoordinator = false;
-                msg.message = "ACK";
-                sendMessage(threadArguments.ucast, msg);
-
-                currentState = "IDLE";
-                break;
-            }
-            case 5://GLOBAL_ABORT
-            {
-                localLog.log("GLOBAL_ABORT");
-                debugLog("Participant received GLOBAL_ABORT");
-                Message msg;
-                msg.isCoordinator = false;
-                msg.message = "ACK";
-                sendMessage(threadArguments.ucast, msg);
-
-                currentState = "IDLE";
-                break;
-            }
-            case 6://IDLE
-            {
-                Message msg;
-                while(true)
-                {
-                    sockaddr_in recvAddr = receiveMessage(threadArguments.mcast, &msg);
-                    if(msg.message == "PREPARE")
-                    {
-                        currentState = "INIT_P";
-                        receivedPrepare = true;
-                        debugLog("Participant received PREPARE in IDLE state");
-                        break;
-                    }
-                    else if((msg.message == "GLOBAL_COMMIT") || (msg.message == "GLOBAL_ABORT"))
-                    {
-                        msg.isCoordinator = false;
-                        msg.message = "ACK";
-                        debugLog("Participant received GLOBAL decision in IDLE state, most likely it is a case of lost ACK");
-                        sendMessage(threadArguments.mcast, msg);
-                    }
-                    else if(msg.message == "EXIT")
-                        break;
+                    debugLog("Coordinator: Flushed old message");
                 }
                 break;
             }
         }
+        if(noOfRequests > NUMBER_OF_ROUNDS)
+            break;
     }
     return nullptr;
 }
@@ -754,6 +828,7 @@ int main(int argc, char* argv[])
     StateDescription["READY"]   = 3;
     StateDescription["GLOBAL_COMMIT"]  = 4;
     StateDescription["GLOBAL_ABORT"]   = 5;
+    StateDescription["IDLE"]   = 6;
 
     Participants.insert("192.168.5.124");
     Participants.insert("192.168.5.125");
@@ -768,19 +843,26 @@ int main(int argc, char* argv[])
     {
         pthread_t CoordinatorThread;
         pthread_create(&CoordinatorThread, nullptr, coordinatorThread, (void*)(&threadArgument));
-        debugLog("Created coordinator thread");
+        debugLog("Main: Created coordinator thread");
         pthread_join(CoordinatorThread, nullptr);
-        debugLog("Coordinator thread rejoined with main");
+        debugLog("Main: Coordinator thread rejoined with main");
     }
     else
     {
         pthread_t DecisionRequestThread, ParticipantThread;
         pthread_create(&DecisionRequestThread, nullptr, decisionRequestThread, (void*)(&threadArgument));
         pthread_create(&ParticipantThread, nullptr, participantThread, (void*)(&threadArgument));
-        debugLog("Created coordinator and decisionRequest thread");
-        pthread_join(DecisionRequestThread, nullptr);
+        debugLog("Main: Created participant and decisionRequest thread");
+        
         pthread_join(ParticipantThread, nullptr);
-        debugLog("Participant and decisionRequest threads rejoined with main");
+        debugLog("Participant thread joined");
+        {
+            std::lock_guard<std::mutex> lock(decisionRequestMtx);
+            decisionRequestTermination = true;
+            cv.notify_one();
+        }
+        pthread_join(DecisionRequestThread, nullptr);
+        debugLog("Main: Participant and decisionRequest threads rejoined with main");
     }
 
     close(mcastAttributes.socket);
