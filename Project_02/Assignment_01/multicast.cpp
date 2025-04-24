@@ -26,6 +26,7 @@
 
 int currentEventID = 0;
 int localClock = 0;
+int myProcessID = 0;
 std::set<std::string> serverList;
 // Mutex for synchronizing shared resources
 std::mutex clockMutex;
@@ -57,7 +58,7 @@ class Message
 {
     public:
         bool isACK = true;/*true->send acknowledgement/ false->receive acknowledgement*/
-        int processID = std::stoi(MY_NODE_ID);
+        int processID = myProcessID;
         int eventID = currentEventID;
         int clock;
 
@@ -114,8 +115,8 @@ class PriorityQueue
     // Comparison logic: returns true if node1 has higher priority than node2.
     bool checkIf_N1_Before_N2(const Node& node1, const Node& node2)
     {
-        if ((node1.msg.clock < node2.msg.clock) ||
-            ((node1.msg.clock == node2.msg.clock) && (node1.msg.processID < node2.msg.processID)))
+        if ((node1.msg.eventID < node2.msg.eventID) ||
+            ((node1.msg.eventID == node2.msg.eventID) && (node1.msg.processID < node2.msg.processID)))
             return true;
         else
             return false;
@@ -329,9 +330,9 @@ void updateClock(std::string type, Message& msg)
     localClock++;
     msg.clock = localClock;
     if(msg.isACK)
-        log(std::string(MY_NODE_ID) + ":" + std::to_string(msg.processID) + "." + std::to_string(msg.eventID) + "\t" + type + "(ACK)" + "\tCLOCK(" + std::to_string(msg.clock) + ")");
+        log(std::to_string(myProcessID) + ":" + std::to_string(msg.processID) + "." + std::to_string(msg.eventID) + "\t" + type + "(ACK)" + "\tCLOCK(" + std::to_string(msg.clock) + ")");
     else
-    log(std::string(MY_NODE_ID) + ":" + std::to_string(msg.processID) + "." + std::to_string(msg.eventID) + "\t" + type + "(REQ)" + "\tCLOCK(" + std::to_string(msg.clock) + ")");
+        log(std::to_string(myProcessID) + ":" + std::to_string(msg.processID) + "." + std::to_string(msg.eventID) + "\t" + type + "(REQ)" + "\tCLOCK(" + std::to_string(msg.clock) + ")");
     //log(RequestQueue.printQueue());
     //log(printHashMap());
 }
@@ -605,7 +606,23 @@ void waitForMinute()
 
 /*For thread spawning and management*/
 /*Event generation*/
-int main() {
+int main(int argc, char* argv[]) {
+    //CLI argument validation
+    /*-------------------------------------------------------------------------------------------------------------------*/
+    if(argc == 1)
+    {
+        myProcessID = std::stoi(MY_NODE_ID);
+    }
+    else if(argc == 2)
+    {
+        myProcessID = std::stoi(argv[1]);
+    }
+    else
+    {
+        std::cerr << "Invalid arguments for invoking main()" << std::endl;
+        std::cerr << "Correct order is [\"" << argv[0] << "\"/" << "\"" << argv[0] << " <processID>" <<"\"]" << std::endl;
+    }
+    /*-------------------------------------------------------------------------------------------------------------------*/
     //Multicast sender socket configuration
     /*-------------------------------------------------------------------------------------------------------------------*/
     struct sockaddr_in mcast_sendAddr{};
