@@ -28,7 +28,7 @@
 //192.168.5.127 ---> 2131077312 --> PROPOSER
 //192.168.5.128 ---> 2147854528 --> COORDINATOR
 
-//#define SEND_PORT   12346
+#define SEND_PORT   12346
 #define RECV_PORT   12345
 #define ENABLE_LOG  true
 #define BROADCAST_ADDR "192.168.5.255"
@@ -478,6 +478,30 @@ bool sendMessage(Message msg)
         exit(EXIT_FAILURE);
     }
 
+    int optval = 1;
+    if (setsockopt(sendSock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("Failed to set SO_REUSEADDR");
+        close(sendSock);
+        exit(EXIT_FAILURE);
+    }
+
+    if (setsockopt(sendSock, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval)) < 0) {
+        perror("Failed to set SO_REUSEPORT");
+        close(sendSock);
+        exit(EXIT_FAILURE);
+    }
+
+    sockaddr_in bindAddr;
+    bindAddr.sin_family = AF_INET;
+    bindAddr.sin_port = htons(SEND_PORT);
+    bindAddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sendSock, (sockaddr*)&bindAddr, sizeof(bindAddr)) < 0) {
+        perror("Failed to bind send socket");
+        close(sendSock);
+        exit(EXIT_FAILURE);
+    }
+
     int sentBytes = sendto(sendSock, &msg, sizeof(msg), 0, (sockaddr*)(&sendAddr), sendAddrlen);
     if(sentBytes < 0)
     {
@@ -725,6 +749,13 @@ bool accept(RecvArgs recvArgs, Message msg)
         for(const in_addr_t &recv_IP : Participants)
         {
             msg.recvIP = recv_IP;
+            {
+                char temp[INET_ADDRSTRLEN];
+                in_addr tempAddr;
+                tempAddr.s_addr = recv_IP;
+                inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                log(GREEN+"PROPOSER: Proposer sent ACCEPT message to "+std::string(temp)+RESET);
+            }
             sendMessage(msg);
         }
         log(GREEN+"PROPOSER: Proposer sent ACCEPT messages to all participants"+RESET);
@@ -1224,27 +1255,107 @@ void livelock(RecvArgs recvArgs)
 /*Simulate a simple message queue*/
 void messageQueue(RecvArgs recvArgs)
 {
+    log(BLUE+"Entered message queue functionality"+RESET);
     int proposeDoneCounter = 0;
+    bool timeoutStatus = false;
     while(true)
     {
+        if(proposerDone && acceptorDone)
         {
-            std::unique_lock<std::mutex> lock(q_Mtx);
-            q_cv.wait(lock, []{ return !recvQueue.empty(); });
+            log(BLUE+"Coordinator: All proposers and acceptors are terminated"+RESET);
+            break;
         }
 
-        Node* tempNode = recvQueue.dequeue();
-        if(tempNode != nullptr)
         {
-            Message msg = tempNode->msg;
-            if(msg.isReq)
+            std::unique_lock<std::mutex> lock(q_Mtx);
+            timeoutStatus = q_cv.wait_for(lock, std::chrono::milliseconds(100), [&]{return !recvQueue.empty();});
+            //q_cv.wait(lock, []{ return !recvQueue.empty(); });
+        }
+        //log(BLUE+"Coordinator: Is receive queue empty"+std::to_string(!recvQueue.empty())+RESET);
+        if((!timeoutStatus) || (!recvQueue.empty()))
+        {
+            Node* tempNode = recvQueue.dequeue();
+            if(tempNode != nullptr)
             {
-                if(msg.recvIP == myIP)
+                Message msg = tempNode->msg;
+                delete(tempNode);
                 {
-                    if(msg.msgType == MsgType::PROPOSAL_REQ)
+                    /*
+                    char temp[INET_ADDRSTRLEN];
+                    in_addr tempAddr;
+                    if(msg.isReq)
                     {
-                        msg.isReq = false;
+                        tempAddr.s_addr = msg.sendIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent by " << temp << std::endl;
+                        tempAddr.s_addr = msg.recvIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent for " << temp << std::endl;
+                    }
+                    else
+                    {
+                        tempAddr.s_addr = msg.recvIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent by " << temp << std::endl;
+                        tempAddr.s_addr = msg.sendIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent for " << temp << std::endl;
+                    }*/
+                }
+                if(msg.isReq)
+                {
+                    //log(BLUE+"Coordinator:--- Received message is request for "+std::to_string(msg.recvIP)+" from "+std::to_string(msg.sendIP)+RESET);
+                    if(msg.recvIP == myIP)
+                    {
+                        //std::cout << "Message was received for coordinator" << std::endl;
+                        //std::cout << "Message type is " << type2str(msg.msgType) << std::endl;
+                        if(msg.msgType == MsgType::PROPOSAL_REQ)
+                        {
+                            {
+                                char temp[INET_ADDRSTRLEN];
+                                in_addr tempAddr;
+                                tempAddr.s_addr = msg.sendIP;
+                                inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                                log(BLUE+"Coordinator: Coordinator accepted PROPOSAL_REQ from "+std::string(temp)+RESET);
+                            }
+                            msg.msgType = MsgType::PROPOSAL_OK;
+                            msg.isReq = false;
+                            sendMessage(msg);
+                            //std::cout << "Coordinator has send approval for proposer's request" << std::endl;
+                        }
+                        else if(msg.msgType == MsgType::PROPOSER_DONE)
+                        {
+                            msg.isReq = false;
+                            proposeDoneCounter++;
+                            sendMessage(msg);
+                            {
+                                char temp[INET_ADDRSTRLEN];
+                                in_addr tempAddr;
+                                tempAddr.s_addr = msg.sendIP;
+                                inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                                log(BLUE+"Coordinator: Received PROPOSAL_DONE from "+std::string(temp)+RESET);
+                            }
+                            if(proposeDoneCounter == noOfProposals)
+                            {
+                                Message msg;
+                                msg.sendIP = myIP;
+                                msg.isReq = true;
+                                msg.msgType = MsgType::ACCEPTOR_DONE;
+                                for(const in_addr_t &sin_addr : Participants)
+                                {
+                                    msg.recvIP = sin_addr;
+                                    sendMessage(msg);
+                                }
+                                log(BLUE+"Coordinator: Coordinator send ACCEPTOR_DONE message to all acceptors"+RESET);
+                                acceptorDone = true;
+                                proposerDone = true;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
                         sendMessage(msg);
-                        proposeDoneCounter++;
                     }
                 }
                 else
@@ -1252,12 +1363,7 @@ void messageQueue(RecvArgs recvArgs)
                     sendMessage(msg);
                 }
             }
-            else
-            {
-                sendMessage(msg);
-            }
         }
-        delete(tempNode);
     }
 }
 
@@ -1272,6 +1378,7 @@ void* receiveThread(void* arg)
         sockaddr_in recvAddr;
         while(true)
         {
+            if(withCoordinator && isCoordinator && proposerDone && acceptorDone) break;
             bool status = receiveMessage(recvArgs, msg, recvAddr, MSG_DONTWAIT);
             if(status)
             {//Mutex lock for enqueuing node in recvQueue
@@ -1280,7 +1387,7 @@ void* receiveThread(void* arg)
                 break;
             }
         }
-        if(msg.msgType == MsgType::PROPOSER_DONE)
+        if((!withCoordinator)&&(msg.msgType == MsgType::PROPOSER_DONE))
         {
             proposerDoneCounter++;
             if(proposerDoneCounter == noOfProposals)
@@ -1289,7 +1396,21 @@ void* receiveThread(void* arg)
                 break;
             }
         }
+        if((withCoordinator) && (!isCoordinator) && (msg.msgType == MsgType::ACCEPTOR_DONE))
+        {
+            acceptorDone = true;
+            break;
+        }
+        /*
+        if((withCoordinator) && (isCoordinator) && (msg.msgType == MsgType::PROPOSER_DONE))
+        {
+            proposerDoneCounter++;
+            acceptorDone = true;
+            break;
+        }
+        */
         //log(BLUE+"The exit flag status are "+std::to_string(proposerDone)+"---"+std::to_string(acceptorDone)+RESET);
+        if(withCoordinator && isCoordinator && proposerDone && acceptorDone) break;
     }
     return nullptr;
 }
@@ -1429,6 +1550,7 @@ void* proposerThread(void* arg)
             case MsgType::PROPOSAL_REQ:
             {
                 proposerMessage.proposalValue = myNodeID;
+                proposerMessage.msgType = MsgType::PROPOSAL_REQ;
                 sockaddr_in sendAddr;
                 socklen_t sendAddrLen = sizeof(sendAddr);
 
@@ -1498,6 +1620,7 @@ void* proposerThread(void* arg)
                 {
                     if(withCoordinator)
                     {
+                        proposerMessage.recvIP = coordinatorIP;
                         proposerMessage.isReq = true;
                         proposerMessage.msgType = MsgType::PROPOSER_DONE;
                         sendMessage(proposerMessage);
@@ -1567,10 +1690,16 @@ int main(int argc, char* argv[])
     sockaddr_in recvAddr;
     recvAddr.sin_family = AF_INET;
     recvAddr.sin_port = htons(RECV_PORT);
-    
-    
-    if(withCoordinator && (!isCoordinator)) recvAddr.sin_addr.s_addr = coordinatorIP;
-    else recvAddr.sin_addr.s_addr = myIP;
+    recvAddr.sin_addr.s_addr = myIP;
+
+    /*std::cout << "Coordinator IP is (uint32)" << coordinatorIP << std::endl;
+    {
+        char temp[INET_ADDRSTRLEN];
+        in_addr tempAddr;
+        tempAddr.s_addr = coordinatorIP;
+        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+        std::cout << "Coordinator IP is (str)" << temp << std::endl;
+    }*/
 
     int recvSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if(recvSocket == -1)
@@ -1678,7 +1807,7 @@ int main(int argc, char* argv[])
         pthread_join(ReceiveThread, nullptr);
         log(BLUE+"Main: Joined receive thread"+RESET);
         pthread_join(AcceptorThread, nullptr);
-        log(BLUE+"Main: Joined receive thread"+RESET);
+        log(BLUE+"Main: Joined acceptor thread"+RESET);
     }
     
     //Close socket
