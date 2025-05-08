@@ -298,6 +298,7 @@ long int updateMaxRound(Message msg)
 
     last = (last << 8) | myNodeID;
 
+    std::cout << last << std::endl;
     return last;
 }
 
@@ -665,7 +666,7 @@ bool prepare(RecvArgs recvArgs, Message msg)
         msg.recvIP = sin_addr;
         sendMessage(msg);
     }
-    log(GREEN+"PROPOSER: Proposer sent PREPARE messages to acceptors"+RESET);
+    log(GREEN+"PROPOSER: Proposer sent PREPARE messages with proposerNumber["+std::to_string(msg.proposalNumber)+"] and proposalValue["+std::to_string(msg.proposalValue)+"] to acceptors"+RESET);
 
     std::set<in_addr_t> TempList(Participants);
     auto startTime = std::chrono::steady_clock::now();
@@ -688,14 +689,14 @@ bool prepare(RecvArgs recvArgs, Message msg)
             if(tempNode->msg.isReq == false)
             {
                 // If the message is for a previous proposal number, flush it
-                if (tempNode->msg.proposalNumber < msg.proposalNumber)
+                /*if (tempNode->msg.proposalNumber < msg.proposalNumber)
                 {
                     tempNode = recvQueue.dequeue();
                     if(tempNode != nullptr)delete(tempNode);
                     else continue;
                     log(GRAY + "PROPOSER: Flushing old message with proposal number " + std::to_string(tempNode->msg.proposalNumber) + RESET);
                     continue;
-                }
+                }*/
 
                 // If it is a valid `PROMISE`, dequeue and process it
                 if (tempNode->msg.msgType == MsgType::PROMISE)
@@ -1355,6 +1356,21 @@ void messageQueue(RecvArgs recvArgs)
                     }
                     else
                     {
+                        if(msg.recvIP != commonAcceptorIP)
+                        {//Skip messages for other quorums
+                            bool skip = false;
+
+                            for(const in_addr_t recepient : commMap[msg.sendIP])
+                            {
+                                if(recepient == msg.recvIP)
+                                {
+                                    skip = true;
+                                    break;
+                                }
+                            }
+    
+                            if(!skip) continue;
+                        }
                         sendMessage(msg);
                     }
                 }
@@ -1502,8 +1518,8 @@ void* acceptorThread(void* arg)
                         acceptorMessage.recvIP = recvNode->msg.recvIP;
                         acceptorMessage.sendIP = recvNode->msg.sendIP;
                         acceptorMessage.msgType = MsgType::PROMISE;
-                        acceptorMessage.lastAcceptedProposal = recvNode->msg.proposalNumber;
-                        acceptorMessage.lastAcceptedValue = recvNode->msg.proposalValue;
+                        //acceptorMessage.lastAcceptedProposal = recvNode->msg.proposalNumber;
+                        //acceptorMessage.lastAcceptedValue = recvNode->msg.proposalValue;
                         sendMessage(acceptorMessage);
                     }
                     else if(recvNode->msg.msgType == MsgType::ACCEPT)
@@ -1511,15 +1527,12 @@ void* acceptorThread(void* arg)
                         acceptorMessage.isReq = false;
                         if(recvNode->msg.proposalNumber >= acceptorMessage.proposalNumber) // Use >= to handle equality
                         {
-                            log(MAGENTA+"ACCEPTOR: Acceptor accepted ACCEPT message("+std::to_string(recvNode->msg.proposalNumber)+") from "+std::string(temp)+", with minProposal as "+std::to_string(acceptorMessage.proposalNumber)+RESET);
                             acceptorMessage.lastAcceptedProposal = recvNode->msg.proposalNumber;
                             acceptorMessage.lastAcceptedValue = recvNode->msg.proposalValue;
                             acceptorMessage.proposalNumber = recvNode->msg.proposalNumber;
                         }
-                        else
-                        {
-                            log(MAGENTA+"ACCEPTOR: Acceptor accepted ACCEPT message("+std::to_string(recvNode->msg.proposalNumber)+") from "+std::string(temp)+", with minProposal as "+std::to_string(acceptorMessage.proposalNumber)+RESET);
-                        }
+                        log(MAGENTA+"ACCEPTOR: Acceptor accepted ACCEPT message("+std::to_string(recvNode->msg.proposalNumber)+") from "+std::string(temp)+", minProposal["+std::to_string(acceptorMessage.proposalNumber)+"] and proposalValue["+std::to_string(acceptorMessage.lastAcceptedValue)+"]"+RESET);
+
                         acceptorMessage.recvIP = myIP;
                         acceptorMessage.sendIP = recvNode->msg.sendIP;
                         acceptorMessage.msgType = MsgType::ACCEPTED;
@@ -1538,9 +1551,6 @@ void* proposerThread(void* arg)
 {
     RecvArgs recvArgs = *(RecvArgs*)arg;
     proposerMessage.sendIP = myIP;
-    proposerMessage.isReq = true;
-    proposerMessage.proposalNumber = updateMaxRound(proposerMessage);
-    proposerMessage.msgType = MsgType::PROPOSAL_REQ;
     MsgType currentState = MsgType::PREPARE;
     while(true)
     {
@@ -1549,38 +1559,46 @@ void* proposerThread(void* arg)
         {
             case MsgType::PROPOSAL_REQ:
             {
+                proposerMessage.isReq = true;
                 proposerMessage.proposalValue = myNodeID;
                 proposerMessage.msgType = MsgType::PROPOSAL_REQ;
+                proposerMessage.sendIP = myIP;
                 sockaddr_in sendAddr;
                 socklen_t sendAddrLen = sizeof(sendAddr);
 
                 if(withCoordinator)
                 {
                     proposerMessage.recvIP = coordinatorIP;
+                    bool timeoutStatus = false;
                     while(true)
                     {
                         sendMessage(proposerMessage);
                         log(GREEN+"PROPOSER:Proposer sent a request to coordinator"+RESET);
                         {
                             std::unique_lock<std::mutex> lock(q_Mtx);
-                            q_cv.wait(lock, []{ return !recvQueue.empty(); });
+                            timeoutStatus = q_cv.wait_for(lock, std::chrono::milliseconds(100), [&]{ return !recvQueue.empty(); });
+                            //q_cv.wait(lock, []{ return !recvQueue.empty(); });
                         }
-                        Node* recvNode = recvQueue.peek();
-                        if(recvNode == nullptr) continue;
-                        else
+                        
+                        if(!timeoutStatus || !recvQueue.empty())
                         {
-                            if(recvNode->msg.isReq == false)
+                            Node* recvNode = recvQueue.peek();
+                            if(recvNode == nullptr) continue;
+                            else
                             {
-                                recvNode = recvQueue.dequeue();
-                                if(recvNode == nullptr) continue;
-                                if(recvNode->msg.msgType == MsgType::PROPOSAL_OK)
+                                if(recvNode->msg.isReq == false)
                                 {
-                                    log(GREEN+"PROPOSER:Received a proposal acceptance from coordinator"+RESET);
-                                    currentState = MsgType::PREPARE;
+                                    recvNode = recvQueue.dequeue();
+                                    if(recvNode == nullptr) continue;
+                                    if(recvNode->msg.msgType == MsgType::PROPOSAL_OK)
+                                    {
+                                        log(GREEN+"PROPOSER:Received a proposal acceptance from coordinator"+RESET);
+                                        currentState = MsgType::PREPARE;
+                                        delete(recvNode);
+                                        break;
+                                    }
                                     delete(recvNode);
-                                    break;
                                 }
-                                delete(recvNode);
                             }
                         }
                     }
@@ -1598,6 +1616,8 @@ void* proposerThread(void* arg)
             {
                 proposerMessage.isReq = true;
                 proposerMessage.msgType = MsgType::PREPARE;
+                proposerMessage.proposalValue = myNodeID;
+                proposerMessage.proposalNumber = updateMaxRound(proposerMessage);
                 if(prepare(recvArgs, proposerMessage))
                 {
                     log(GREEN+"PROPOSER:Proposer is entering ACCEPT phase"+RESET);
