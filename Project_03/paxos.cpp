@@ -222,14 +222,14 @@ class RecvQueue {
             front = front->next;
             n->next = nullptr;
             if (!front) rear = nullptr;
-            if(n != nullptr)
+            /*if(n != nullptr)
             {
                 log(GRAY+"Dequeued the message "+type2str(n->msg.msgType)+RESET);
             }
             else
             {
                 log(GRAY+"Dequeued nullptr"+RESET);
-            }
+            }*/
             return n;
         }
 
@@ -517,11 +517,11 @@ bool receiveMessage(RecvArgs recvArgs, Message& msg, sockaddr_in& recvAddr, int 
         inet_ntop(AF_INET, &recvAddr.sin_addr, IP_str, INET_ADDRSTRLEN);
 
         if(isProposer)
-            log(GRAY+"Proposer: Received [message:"+type2str(msg.msgType)+"] from [address:"+IP_str+"] at [port:"+std::to_string((uint16_t)ntohs(recvAddr.sin_port))+"]"+RESET);
+            log(GRAY+"Proposer: Received [message:"+type2str(msg.msgType)+"] from [address:"+IP_str+"] from [port:"+std::to_string((uint16_t)ntohs(recvAddr.sin_port))+"]"+RESET);
         else if(isCoordinator)
-            log(GRAY+"Coordinator: Received [message:"+type2str(msg.msgType)+"] from [address:"+IP_str+"] at [port:"+std::to_string((uint16_t)ntohs(recvAddr.sin_port))+"]"+RESET);
+            log(GRAY+"Coordinator: Received [message:"+type2str(msg.msgType)+"] from [address:"+IP_str+"] from [port:"+std::to_string((uint16_t)ntohs(recvAddr.sin_port))+"]"+RESET);
         else
-            log(GRAY+"Acceptor: Received [message:"+type2str(msg.msgType)+"] from [address:"+IP_str+"] at [port:"+std::to_string((uint16_t)ntohs(recvAddr.sin_port))+"]"+RESET);
+            log(GRAY+"Acceptor: Received [message:"+type2str(msg.msgType)+"] from [address:"+IP_str+"] from [port:"+std::to_string((uint16_t)ntohs(recvAddr.sin_port))+"]"+RESET);
         return true;
     }
 }
@@ -1289,7 +1289,7 @@ void* receiveThread(void* arg)
                 break;
             }
         }
-        log(BLUE+"The exit flag status are "+std::to_string(proposerDone)+"---"+std::to_string(acceptorDone)+RESET);
+        //log(BLUE+"The exit flag status are "+std::to_string(proposerDone)+"---"+std::to_string(acceptorDone)+RESET);
     }
     return nullptr;
 }
