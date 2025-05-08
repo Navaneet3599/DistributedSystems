@@ -8,6 +8,7 @@
 #include <string.h>
 #include <string>
 #include <chrono>
+#include <iomanip>
 #include <ctime>
 #include <cstdlib>
 #include <sstream>
@@ -102,7 +103,7 @@ class ActivityLog
                 MyFile.close();
         }
 
-        std::string getCurrentTimeStamp()
+        /*std::string getCurrentTimeStamp()
         {
             auto now = std::chrono::system_clock::now();
             std::time_t now_c = std::chrono::system_clock::to_time_t(now);
@@ -110,6 +111,27 @@ class ActivityLog
 
             std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&now_c));
             return std::string(buffer);
+        }*/
+        std::string getCurrentTimeStamp()
+        {
+            // Get the current time
+            auto now = std::chrono::system_clock::now();
+        
+            // Convert to time_t to extract standard date-time
+            std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+        
+            // Convert to milliseconds
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+        
+            // Format date-time
+            std::tm* now_tm = std::localtime(&now_c);
+        
+            // Create stringstream to format the output
+            std::ostringstream oss;
+            oss << std::put_time(now_tm, "%Y-%m-%d %H:%M:%S") << '.' << std::setw(3) << std::setfill('0') << ms.count();
+        
+            // Return the formatted string
+            return oss.str();
         }
 
         bool log(const std::string txt)
@@ -729,6 +751,10 @@ bool prepare(RecvArgs recvArgs, Message msg)
                         return true;
                     }
                 }
+                else
+                {
+                    log(GREEN+"Proposer: Proposer received "+type2str(msg.msgType)+RESET);
+                }
             }
         }
 
@@ -839,85 +865,167 @@ bool accept(RecvArgs recvArgs, Message msg)
 /*Simulate case 1 as per PPT*/
 void back2back_1(RecvArgs recvArgs)
 {
+    log(BLUE+"Entered slide 63 functionality"+RESET);
     int proposeDoneCounter = 0;
+    bool timeoutStatus = false;
+    bool onlyOnce = false;
+    bool myCondition = false;
+    
     while(true)
     {
-        if(acceptedCounter == 3)
+        if(proposerDone && acceptorDone)
         {
-            Message msg1 = reqMap["127_125"];
-            sendMessage(msg1);
-            msg1 = reqMap["127_126"];
-            sendMessage(msg1);
-            msg1 = reqMap["127_127"];
-            sendMessage(msg1);
-            acceptedCounter = 4;
+            log(BLUE+"Coordinator: All proposers and acceptors are terminated"+RESET);
+            break;
+        }
+
+        if(!onlyOnce && myCondition)
+        {
+            Message msg = reqMap["127_128"];
+            sendMessage(msg);
+            std::cout << "node 128 is sending PROPOSAL_OK to 127" << std::endl;
+            onlyOnce = true;
         }
 
         {
             std::unique_lock<std::mutex> lock(q_Mtx);
-            q_cv.wait(lock, []{ return !recvQueue.empty(); });
+            timeoutStatus = q_cv.wait_for(lock, std::chrono::milliseconds(100), [&]{return !recvQueue.empty();});
+            //q_cv.wait(lock, []{ return !recvQueue.empty(); });
         }
-
-        Node* tempNode = recvQueue.dequeue();
-        if(tempNode != nullptr)
+        //log(BLUE+"Coordinator: Is receive queue empty"+std::to_string(!recvQueue.empty())+RESET);
+        if((!timeoutStatus) || (!recvQueue.empty()))
         {
-            Message msg = tempNode->msg;
-
-            char sendIP[INET_ADDRSTRLEN], recvIP[INET_ADDRSTRLEN];
-            std::string sendNode, recvNode;
-            inet_ntop(AF_INET, &msg.sendIP, sendIP, INET_ADDRSTRLEN);
-            inet_ntop(AF_INET, &msg.recvIP, recvIP, INET_ADDRSTRLEN);
-
-            int endDotPos = std::string(sendIP).find_last_of(".");
-            sendNode = (std::string(sendIP)).substr(endDotPos+1, strlen(sendIP)-endDotPos);
-            endDotPos = std::string(recvIP).find_last_of(".");
-            recvNode = (std::string(recvIP)).substr(endDotPos+1, strlen(recvIP)-endDotPos);
-
-            std::string key = sendNode + "_" + recvNode;
-
-            if(msg.isReq)
+            Node* tempNode = recvQueue.dequeue();
+            if(tempNode != nullptr)
             {
-                if(msg.recvIP == myIP)
+                Message msg = tempNode->msg;
+
+                char sendIP[INET_ADDRSTRLEN], recvIP[INET_ADDRSTRLEN];
+                std::string sendNode, recvNode;
+                inet_ntop(AF_INET, &msg.sendIP, sendIP, INET_ADDRSTRLEN);
+                inet_ntop(AF_INET, &msg.recvIP, recvIP, INET_ADDRSTRLEN);
+
+                int endDotPos = std::string(sendIP).find_last_of(".");
+                sendNode = (std::string(sendIP)).substr(endDotPos+1, strlen(sendIP)-endDotPos);
+                endDotPos = std::string(recvIP).find_last_of(".");
+                recvNode = (std::string(recvIP)).substr(endDotPos+1, strlen(recvIP)-endDotPos);
+
+                std::string key = sendNode + "_" + recvNode;
+
+                delete(tempNode);
                 {
-                    if(msg.msgType == MsgType::PROPOSAL_REQ)
+                    /*
+                    char temp[INET_ADDRSTRLEN];
+                    in_addr tempAddr;
+                    if(msg.isReq)
                     {
-                        msg.isReq = false;
-                        proposeDoneCounter++;
+                        tempAddr.s_addr = msg.sendIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent by " << temp << std::endl;
+                        tempAddr.s_addr = msg.recvIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent for " << temp << std::endl;
+                    }
+                    else
+                    {
+                        tempAddr.s_addr = msg.recvIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent by " << temp << std::endl;
+                        tempAddr.s_addr = msg.sendIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent for " << temp << std::endl;
+                    }*/
+                }
+                if(msg.isReq)
+                {
+                    //log(BLUE+"Coordinator:--- Received message is request for "+std::to_string(msg.recvIP)+" from "+std::to_string(msg.sendIP)+RESET);
+                    if(msg.recvIP == myIP)
+                    {
+                        //std::cout << "Message was received for coordinator" << std::endl;
+                        //std::cout << "Message type is " << type2str(msg.msgType) << std::endl;
+                        if(msg.msgType == MsgType::PROPOSAL_REQ)
+                        {
+                            msg.msgType = MsgType::PROPOSAL_OK;
+                            msg.isReq = false;
+
+                            if((!onlyOnce) && (msg.sendIP == 2131077312))
+                            {
+                                std::cout << "Generated key is " << key << std::endl;
+                                reqMap[key] = msg;
+                                continue;
+                            }
+
+                            sendMessage(msg);
+                            {
+                                char temp[INET_ADDRSTRLEN];
+                                in_addr tempAddr;
+                                tempAddr.s_addr = msg.sendIP;
+                                inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                                log(BLUE+"Coordinator: Coordinator accepted PROPOSAL_REQ from "+std::string(temp)+RESET);
+                            }
+                            //std::cout << "Coordinator has send approval for proposer's request" << std::endl;
+                        }
+                        else if(msg.msgType == MsgType::PROPOSER_DONE)
+                        {
+                            msg.isReq = false;
+                            proposeDoneCounter++;
+                            if(msg.sendIP == 2063968448)
+                            {
+                                myCondition = true;
+                                std::cout << "node 123 sent PROPOSER_DONE" << std::endl;
+                            }
+                            sendMessage(msg);
+                            {
+                                char temp[INET_ADDRSTRLEN];
+                                in_addr tempAddr;
+                                tempAddr.s_addr = msg.sendIP;
+                                inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                                log(BLUE+"Coordinator: Received PROPOSAL_DONE from "+std::string(temp)+RESET);
+                            }
+                            if(proposeDoneCounter == noOfProposals)
+                            {
+                                Message msg;
+                                msg.sendIP = myIP;
+                                msg.isReq = true;
+                                msg.msgType = MsgType::ACCEPTOR_DONE;
+                                for(const in_addr_t &sin_addr : Participants)
+                                {
+                                    msg.recvIP = sin_addr;
+                                    sendMessage(msg);
+                                }
+                                log(BLUE+"Coordinator: Coordinator send ACCEPTOR_DONE message to all acceptors"+RESET);
+                                acceptorDone = true;
+                                proposerDone = true;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if(msg.recvIP != commonAcceptorIP)
+                        {//Skip messages for other quorums
+                            bool skip = false;
+
+                            for(const in_addr_t recepient : commMap[msg.sendIP])
+                            {
+                                if(recepient == msg.recvIP)
+                                {
+                                    skip = true;
+                                    break;
+                                }
+                            }
+    
+                            if(!skip) continue;
+                        }
                         sendMessage(msg);
                     }
                 }
                 else
                 {
-                    {//Skip messages for other quorums
-                        bool skip = false;
-
-                        for(const in_addr_t recepient : commMap[msg.sendIP])
-                            if(recepient == msg.recvIP)
-                                skip = true;
-
-                        if(skip)
-                            continue;
-                    }
-
-                    if((msg.msgType == MsgType::PREPARE) && (sendNode == "127") && (acceptedCounter <= 3))
-                    {
-                        //Buffer messages from 127
-                        reqMap[key] = msg;
-                        continue;
-                    }
-                    else
-                    {
-                        sendMessage(msg);
-                    }
+                    sendMessage(msg);
                 }
             }
-            else
-            {
-                if((msg.msgType == MsgType::ACCEPTED) && (recvNode == "123")) acceptedCounter++;
-                sendMessage(msg);
-            }
         }
-        if(proposeDoneCounter == 2) break;
     }
 }
 
@@ -925,93 +1033,180 @@ void back2back_1(RecvArgs recvArgs)
 /*Simulate case 2 as per PPT*/
 void back2back_2(RecvArgs recvArgs)
 {
+    log(BLUE+"Entered slide 64 functionality"+RESET);
     int proposeDoneCounter = 0;
-    int conditionCounter  = 0;
+    bool timeoutStatus = false;
+    bool onlyOnce = false;
+    bool myCondition = false;
+    
     while(true)
     {
-        if((conditionCounter == 4) && (acceptedCounter == 1) && (!onlyOnce))
+        if(proposerDone && acceptorDone)
         {
-            Message msg = reqMap["127_125"];
+            log(BLUE+"Coordinator: All proposers and acceptors are terminated"+RESET);
+            break;
+        }
+
+        if(!onlyOnce && myCondition)
+        {
+            Message msg = reqMap["127_128"];
+            reqMap.erase("127_128");
             sendMessage(msg);
-            msg = reqMap["127_125"];
-            sendMessage(msg);
-            msg = reqMap["127_126"];
-            sendMessage(msg);
-            msg = reqMap["127_127"];
-            sendMessage(msg);
+            log(BLUE+"Coordinator is sending PROPOSAL_OK to 127"+RESET);
+
             msg = reqMap["123_123"];
+            reqMap.erase("123_123");
             sendMessage(msg);
+            log(BLUE+"Coordinator is sending PREPARE message from 123 to 123"+RESET);
+
             msg = reqMap["123_124"];
+            reqMap.erase("123_124");
             sendMessage(msg);
-            onlyOnce = true; 
+            log(BLUE+"Coordinator is sending PREPARE message from 123 to 124"+RESET);
+
+            onlyOnce = true;
         }
 
         {
             std::unique_lock<std::mutex> lock(q_Mtx);
-            q_cv.wait(lock, []{ return !recvQueue.empty(); });
+            timeoutStatus = q_cv.wait_for(lock, std::chrono::milliseconds(100), [&]{return !recvQueue.empty();});
+            //q_cv.wait(lock, []{ return !recvQueue.empty(); });
         }
-
-        Node* tempNode = recvQueue.dequeue();
-        if(tempNode != nullptr)
+        //log(BLUE+"Coordinator: Is receive queue empty"+std::to_string(!recvQueue.empty())+RESET);
+        if((!timeoutStatus) || (!recvQueue.empty()))
         {
-            Message msg = tempNode->msg;
-
-            char sendIP[INET_ADDRSTRLEN], recvIP[INET_ADDRSTRLEN];
-            std::string sendNode, recvNode;
-            inet_ntop(AF_INET, &msg.sendIP, sendIP, INET_ADDRSTRLEN);
-            inet_ntop(AF_INET, &msg.recvIP, recvIP, INET_ADDRSTRLEN);
-
-            int endDotPos = std::string(sendIP).find_last_of(".");
-            sendNode = (std::string(sendIP)).substr(endDotPos+1, strlen(sendIP)-endDotPos);
-            endDotPos = std::string(recvIP).find_last_of(".");
-            recvNode = (std::string(recvIP)).substr(endDotPos+1, strlen(recvIP)-endDotPos);
-
-            std::string key = sendNode + "_" + recvNode;
-
-            if(msg.isReq)
+            Node* tempNode = recvQueue.dequeue();
+            if(tempNode != nullptr)
             {
-                if(msg.recvIP == myIP)
+                Message msg = tempNode->msg;
+
+                char sendIP[INET_ADDRSTRLEN], recvIP[INET_ADDRSTRLEN];
+                std::string sendNode, recvNode;
+                inet_ntop(AF_INET, &msg.sendIP, sendIP, INET_ADDRSTRLEN);
+                inet_ntop(AF_INET, &msg.recvIP, recvIP, INET_ADDRSTRLEN);
+
+                int endDotPos = std::string(sendIP).find_last_of(".");
+                sendNode = (std::string(sendIP)).substr(endDotPos+1, strlen(sendIP)-endDotPos);
+                endDotPos = std::string(recvIP).find_last_of(".");
+                recvNode = (std::string(recvIP)).substr(endDotPos+1, strlen(recvIP)-endDotPos);
+
+                std::string key = sendNode + "_" + recvNode;
+
+                delete(tempNode);
                 {
-                    if(msg.msgType == MsgType::PROPOSAL_REQ)
+                    /*
+                    char temp[INET_ADDRSTRLEN];
+                    in_addr tempAddr;
+                    if(msg.isReq)
                     {
-                        msg.isReq = false;
-                        proposeDoneCounter++;
-                        sendMessage(msg);
+                        tempAddr.s_addr = msg.sendIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent by " << temp << std::endl;
+                        tempAddr.s_addr = msg.recvIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent for " << temp << std::endl;
+                    }
+                    else
+                    {
+                        tempAddr.s_addr = msg.recvIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent by " << temp << std::endl;
+                        tempAddr.s_addr = msg.sendIP;
+                        inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                        std::cout << "Message was sent for " << temp << std::endl;
+                    }*/
+                }
+                if(msg.isReq)
+                {
+                    //log(BLUE+"Coordinator:--- Received message is request for "+std::to_string(msg.recvIP)+" from "+std::to_string(msg.sendIP)+RESET);
+                    if(msg.recvIP == myIP)
+                    {
+                        //std::cout << "Message was received for coordinator" << std::endl;
+                        //std::cout << "Message type is " << type2str(msg.msgType) << std::endl;
+                        if(msg.msgType == MsgType::PROPOSAL_REQ)
+                        {
+                            msg.msgType = MsgType::PROPOSAL_OK;
+                            msg.isReq = false;
+
+                            if((!onlyOnce) && (msg.sendIP == 2131077312))
+                            {
+                                reqMap[key] = msg;
+                                continue;
+                            }
+
+                            sendMessage(msg);
+                            {
+                                char temp[INET_ADDRSTRLEN];
+                                in_addr tempAddr;
+                                tempAddr.s_addr = msg.sendIP;
+                                inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                                log(BLUE+"Coordinator: Coordinator accepted PROPOSAL_REQ from "+std::string(temp)+RESET);
+                            }
+                            //std::cout << "Coordinator has send approval for proposer's request" << std::endl;
+                        }
+                        else if(msg.msgType == MsgType::PROPOSER_DONE)
+                        {
+                            msg.isReq = false;
+                            proposeDoneCounter++;
+                            
+                            sendMessage(msg);
+                            {
+                                char temp[INET_ADDRSTRLEN];
+                                in_addr tempAddr;
+                                tempAddr.s_addr = msg.sendIP;
+                                inet_ntop(AF_INET, &tempAddr, temp, INET_ADDRSTRLEN);
+                                log(BLUE+"Coordinator: Received PROPOSAL_DONE from "+std::string(temp)+RESET);
+                            }
+                            if(proposeDoneCounter == noOfProposals)
+                            {
+                                Message msg;
+                                msg.sendIP = myIP;
+                                msg.isReq = true;
+                                msg.msgType = MsgType::ACCEPTOR_DONE;
+                                for(const in_addr_t &sin_addr : Participants)
+                                {
+                                    msg.recvIP = sin_addr;
+                                    sendMessage(msg);
+                                }
+                                log(BLUE+"Coordinator: Coordinator send ACCEPTOR_DONE message to all acceptors"+RESET);
+                                acceptorDone = true;
+                                proposerDone = true;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if(msg.recvIP != commonAcceptorIP)
+                        {//Skip messages for other quorums
+                            bool skip = false;
+
+                            for(const in_addr_t recepient : commMap[msg.sendIP])
+                            {
+                                if(recepient == msg.recvIP)
+                                {
+                                    skip = true;
+                                    break;
+                                }
+                            }
+    
+                            if(!skip) continue;
+                            if(!onlyOnce) reqMap[key] = msg;
+                        }
+                        sendMessage(msg); 
                     }
                 }
                 else
                 {
-                    {//Skip messages for other quorums
-                        bool skip = false;
-
-                        for(const in_addr_t recepient : commMap[msg.sendIP])
-                            if(recepient == msg.recvIP)
-                                skip = true;
-
-                        if(skip)
-                            continue;
-                    }
-
-                    if(((msg.msgType == MsgType::PREPARE) && (sendNode == "127")) || ((msg.msgType == MsgType::ACCEPT)&&(sendNode == "123")&&(recvNode != "125")))
+                    if((msg.msgType == MsgType::ACCEPTED)&&(msg.recvIP == commonAcceptorIP) && (msg.sendIP == 2063968448))
                     {
-                        //Buffer messages from 127
-                        reqMap[key] = msg;
-                        continue;
+                        myCondition = true;
+                        log(BLUE+"Coordinator sent ACCEPTED from 125[COMMON_ACCEPTOR] to 123 before consensus is reached"+RESET);
                     }
-                    else
-                    {
-                        sendMessage(msg);
-                        conditionCounter++;
-                    }
+                    sendMessage(msg);
                 }
             }
-            else
-            {
-                if((msg.msgType == MsgType::ACCEPTED) && (recvNode == "125") && (sendNode == "123")) acceptedCounter++;
-                sendMessage(msg);
-            }
         }
-        if(proposeDoneCounter == 2) break;
     }
 }
 
@@ -1435,7 +1630,7 @@ void* receiveThread(void* arg)
 void* coordinatorThread(void* arg)
 {
     RecvArgs recvArgs = *(RecvArgs*)arg;
-    switch(CoordinatorMode::MSG_Q)
+    switch(CoordinatorMode::B2B_2)
     {
         case CoordinatorMode::B2B_1:
         {
@@ -1501,7 +1696,7 @@ void* acceptorThread(void* arg)
                     if(recvNode == nullptr) continue;
                     char temp[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &recvNode->msg.sendIP, temp, INET_ADDRSTRLEN);
-                    
+                    #if 0
                     if(recvNode->msg.msgType == MsgType::PREPARE)
                     {
                         acceptorMessage.isReq = false;
@@ -1538,6 +1733,66 @@ void* acceptorThread(void* arg)
                         acceptorMessage.msgType = MsgType::ACCEPTED;
                         sendMessage(acceptorMessage);
                     }
+                    #else
+                    if(recvNode->msg.msgType == MsgType::PREPARE)
+                    {
+                        acceptorMessage.isReq = false;
+
+                        // If this proposal number is greater than any we have promised
+                        if(recvNode->msg.proposalNumber > acceptorMessage.proposalNumber)
+                        {
+                            acceptorMessage.proposalNumber = recvNode->msg.proposalNumber;
+                            
+                            // Log and update state
+                            log(MAGENTA+"ACCEPTOR: Acceptor accepted PREPARE message("+std::to_string(recvNode->msg.proposalNumber)+") from "+std::string(temp)+", with minProposal as "+std::to_string(acceptorMessage.proposalNumber)+RESET);
+                            updateMaxRound(recvNode->msg);
+
+                            // Send a PROMISE back with the last accepted proposal and value
+                            acceptorMessage.lastAcceptedProposal = acceptedProposal;
+                            acceptorMessage.lastAcceptedValue = acceptedValue;
+                        }
+                        else
+                        {
+                            // Log rejection of PREPARE
+                            log(MAGENTA+"ACCEPTOR: Acceptor rejected PREPARE message("+std::to_string(recvNode->msg.proposalNumber)+") from "+std::string(temp)+", with minProposal as "+std::to_string(acceptorMessage.proposalNumber)+RESET);
+                        }
+                        
+                        // Prepare the promise message
+                        acceptorMessage.recvIP = recvNode->msg.recvIP;
+                        acceptorMessage.sendIP = recvNode->msg.sendIP;
+                        acceptorMessage.msgType = MsgType::PROMISE;
+
+                        // Send the promise back
+                        sendMessage(acceptorMessage);
+                    }
+                    else if(recvNode->msg.msgType == MsgType::ACCEPT)
+                    {
+                        acceptorMessage.isReq = false;
+
+                        // ACCEPT logic: Only accept if proposalNumber matches or exceeds the promised one
+                        if(recvNode->msg.proposalNumber >= acceptorMessage.proposalNumber)
+                        {
+                            // Update state with accepted proposal and value
+                            acceptedProposal = recvNode->msg.proposalNumber;
+                            acceptedValue = recvNode->msg.proposalValue;
+
+                            log(MAGENTA+"ACCEPTOR: Acceptor accepted ACCEPT message("+std::to_string(recvNode->msg.proposalNumber)+") from "+std::string(temp)+", with minProposal as "+std::to_string(acceptorMessage.proposalNumber)+RESET);
+                        }
+                        else
+                        {
+                            // If the proposal was less than promised, it is rejected implicitly
+                            log(MAGENTA+"ACCEPTOR: Acceptor rejected ACCEPT message("+std::to_string(recvNode->msg.proposalNumber)+") from "+std::string(temp)+RESET);
+                        }
+
+                        // Send ACCEPTED message
+                        acceptorMessage.recvIP = myIP;
+                        acceptorMessage.sendIP = recvNode->msg.sendIP;
+                        acceptorMessage.msgType = MsgType::ACCEPTED;
+                        acceptorMessage.lastAcceptedProposal = acceptedProposal;
+                        acceptorMessage.lastAcceptedValue = acceptedValue;
+                        sendMessage(acceptorMessage);
+                    }
+                    #endif
                     delete(recvNode);
                 }
             }
@@ -1551,7 +1806,7 @@ void* proposerThread(void* arg)
 {
     RecvArgs recvArgs = *(RecvArgs*)arg;
     proposerMessage.sendIP = myIP;
-    MsgType currentState = MsgType::PREPARE;
+    MsgType currentState = MsgType::PROPOSAL_REQ;
     while(true)
     {
         if(currentState == MsgType::PROPOSER_DONE) break;
